@@ -1,0 +1,34 @@
+# macOS / editor local state
+.DS_Store
+._*
+.idea/
+.vscode/
+
+# Dependencies and package manager state
+node_modules/
+package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Generated release artifacts
+*.tgz
+public/downloads/
+
+# Runtime logs and local service output
+*.log
+ClaudeCodexRouterUI.log
+ClaudeCodexRouterUI.error.log
+
+# Local credentials and environment overrides
+.env
+.env.*
+.npmrc
+
+# Local routing/test state if someone runs with project-local overrides
+.claude/
+.codex/
+.claude-codex-router/
+router-history/
+router-hooks/

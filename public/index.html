@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f2f0e9" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Router" />
+    <title>Claude × Codex Router</title>
+    <link rel="manifest" href="/manifest.webmanifest?v=20260715-11" />
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <link rel="stylesheet" href="/styles.css?v=20260715-11" />
+  </head>
+  <body class="setup-mode">
+    <div class="grain" aria-hidden="true"></div>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span>C</span><i></i><span>X</span></div>
+        <div>
+          <p class="eyebrow">LOCAL CONTROL PLANE</p>
+          <h1>Claude × Codex Router</h1>
+        </div>
+      </div>
+      <div class="top-actions">
+        <a class="export-button" href="/downloads/Claude-Codex-Router-UI.zip" download><span>⇧</span> Export installer</a>
+        <button id="installButton" class="install-button" type="button"><span>↓</span> Install app</button>
+        <div class="local-pill"><span></span> Local only · 127.0.0.1</div>
+      </div>
+    </header>
+
+    <main>
+      <section class="status-strip">
+        <div><span class="status-label">CONFIG</span><code id="routingPath">Loading…</code></div>
+        <div class="status-actions">
+          <span id="managedBadge" class="badge muted">Reading</span>
+          <button id="restoreButton" class="text-button" type="button">↶ Restore last backup</button>
+        </div>
+      </section>
+
+      <nav class="view-tabs" aria-label="Розділи утиліти">
+        <button class="active" type="button" data-view="setup"><span>00</span> Setup from zero</button>
+        <button type="button" data-view="routing"><span>01</span> Routing config</button>
+        <button type="button" data-view="history"><span>02</span> Task & token history</button>
+      </nav>
+
+      <section id="setupView" class="setup-view">
+        <section class="panel setup-panel">
+          <div class="setup-heading">
+            <div>
+              <span class="section-no">E2E</span>
+              <div><h3>Підключення Claude → Codex з нуля</h3><p>Майстер перевіряє кожен шар, пояснює зміни та не переходить далі, доки залежність не готова.</p></div>
+            </div>
+            <button id="refreshSetupButton" class="icon-button" type="button">Recheck</button>
+          </div>
+
+          <div class="setup-progress-block">
+            <div><span>Загальна готовність</span><strong id="setupProgressText">Перевіряємо…</strong></div>
+            <div class="setup-progress"><i id="setupProgressBar"></i></div>
+          </div>
+
+          <div class="auth-boundary">
+            <span class="lock">⌁</span>
+            <div><strong>Subscription-only boundary</strong><p>Інсталятор прибирає API-key variables лише з дочірніх setup-процесів. SSO/OAuth відбувається у браузері провайдера; Router не читає і не копіює credentials.</p></div>
+            <span>NO API BILLING</span>
+          </div>
+
+          <div id="setupWarnings" class="setup-warnings" hidden></div>
+
+          <div class="setup-steps">
+            <article class="setup-step" data-setup-step="runtime">
+              <div class="setup-step-no">01</div>
+              <div class="setup-step-body">
+                <div class="setup-step-title"><div><h4>Локальний runtime</h4><p>Потрібен, щоб запустити PWA та інсталювати Codex без sudo.</p></div><span class="setup-step-status">Reading</span></div>
+                <p class="setup-explanation">Desktop installer спочатку шукає Node.js 18+. Якщо його немає, завантажує pinned Node runtime у папку Router — системний Node і shell-конфіг не змінюються.</p>
+                <div class="setup-facts" id="runtimeFacts"></div>
+              </div>
+            </article>
+
+            <article class="setup-step" data-setup-step="claude">
+              <div class="setup-step-no">02</div>
+              <div class="setup-step-body">
+                <div class="setup-step-title"><div><h4>Claude Code + корпоративний SSO</h4><p>Claude залишається основним інтерфейсом і власником задачі.</p></div><span class="setup-step-status">Reading</span></div>
+                <p class="setup-explanation">CLI потрібен для автоматичного керування plugin marketplace. Авторизація відкривається окремо через <code>claude auth login --sso</code>; corporate policy та workspace permissions мають пріоритет.</p>
+                <div class="setup-facts" id="claudeFacts"></div>
+                <div class="setup-actions-row">
+                  <button id="installClaudeButton" class="primary-small" type="button" data-setup-action="install-claude">Install official Claude CLI</button>
+                  <button id="authClaudeButton" class="secondary-small" type="button" data-setup-action="auth-claude">Open corporate SSO</button>
+                </div>
+              </div>
+            </article>
+
+            <article class="setup-step" data-setup-step="codex">
+              <div class="setup-step-no">03</div>
+              <div class="setup-step-body">
+                <div class="setup-step-title"><div><h4>Codex CLI + ChatGPT subscription</h4><p>Codex виконує делеговані задачі та незалежні перевірки.</p></div><span class="setup-step-status">Reading</span></div>
+                <p class="setup-explanation">Codex встановлюється у user-space. Login запускається без <code>OPENAI_API_KEY</code> і має завершитися методом ChatGPT або enterprise access token, а не Platform API billing.</p>
+                <div class="setup-facts" id="codexFacts"></div>
+                <div class="setup-actions-row">
+                  <button id="installCodexButton" class="primary-small" type="button" data-setup-action="install-codex">Install Codex CLI</button>
+                  <button id="authCodexButton" class="secondary-small" type="button" data-setup-action="auth-codex">Open ChatGPT login</button>
+                </div>
+              </div>
+            </article>
+
+            <article class="setup-step" data-setup-step="plugin">
+              <div class="setup-step-no">04</div>
+              <div class="setup-step-body">
+                <div class="setup-step-title"><div><h4>Claude → Codex bridge plugin</h4><p>Офіційний OpenAI marketplace та <code>codex:codex-rescue</code> subagent.</p></div><span class="setup-step-status">Reading</span></div>
+                <p class="setup-explanation">Router додає <code>openai/codex-plugin-cc</code> через Claude CLI, встановлює plugin у user scope та перевіряє agent/runtime файли. Cache plugin-а вручну не редагується.</p>
+                <div class="setup-facts" id="pluginFacts"></div>
+                <div class="setup-actions-row"><button id="installPluginButton" class="primary-small" type="button" data-setup-action="install-plugin">Install / repair bridge</button></div>
+              </div>
+            </article>
+
+            <article class="setup-step" data-setup-step="config">
+              <div class="setup-step-no">05</div>
+              <div class="setup-step-body">
+                <div class="setup-step-title"><div><h4>Routing policy + telemetry</h4><p>Моделі, effort, plan audit, backups і локальна історія рішень.</p></div><span class="setup-step-status">Reading</span></div>
+                <p class="setup-explanation">Apply створює backup, записує глобальну routing policy та додає лише власні hooks. Інші Claude settings і hooks зберігаються.</p>
+                <div class="setup-facts" id="configurationFacts"></div>
+                <div class="setup-actions-row"><button id="applySetupConfigButton" class="primary-small" type="button" data-setup-action="apply-configuration">Apply / repair configuration</button></div>
+              </div>
+            </article>
+
+            <article class="setup-step" data-setup-step="bridge">
+              <div class="setup-step-no">06</div>
+              <div class="setup-step-body">
+                <div class="setup-step-title"><div><h4>Перевірка з’єднання</h4><p>Спочатку без токенів, потім — опційний мінімальний live handshake.</p></div><span class="setup-step-status">Reading</span></div>
+                <p class="setup-explanation"><b>Self-check</b> перевіряє plugin runtime, agent manifest, Codex binary та subscription auth без виклику моделі. <b>Live handshake</b> запускає один короткий Codex turn і не читає та не змінює файли.</p>
+                <div class="setup-facts" id="bridgeFacts"></div>
+                <div class="setup-actions-row">
+                  <button id="selfCheckButton" class="primary-small" type="button" data-setup-action="self-check">Run token-free self-check</button>
+                  <button id="liveTestButton" class="secondary-small" type="button" data-setup-action="live-test">Live handshake · uses tokens</button>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div id="setupComplete" class="setup-complete" hidden>
+            <div><span>✓</span><div><strong>З’єднання готове</strong><p>Можна користуватися Claude як раніше — routing, делегування й аудит працюватимуть під капотом.</p></div></div>
+            <button id="continueToRoutingButton" class="primary-small" type="button">Open routing config →</button>
+          </div>
+        </section>
+      </section>
+
+      <section id="routingView" class="workspace" hidden>
+        <div class="controls-column">
+          <section class="panel preset-panel">
+            <div class="panel-heading">
+              <div><span class="section-no">00</span><h3>Профіль витрат</h3></div>
+              <span id="costBadge" class="cost-badge">Balanced</span>
+            </div>
+            <div class="segmented" role="group" aria-label="Профіль витрат">
+              <button type="button" data-preset="economy">Economy<small>мінімум рев’ю</small></button>
+              <button type="button" data-preset="balanced" class="active">Balanced<small>рекомендовано</small></button>
+              <button type="button" data-preset="strict">Strict<small>більше контролю</small></button>
+            </div>
+            <p class="preset-note">Профіль лише заповнює рекомендовані значення нижче. Ручна зміна робить профіль <b>Custom</b>, але автоматичну маршрутизацію не вимикає.</p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading"><div><span class="section-no">01</span><h3>Claude за кермом</h3></div></div>
+            <div class="claude-control-grid">
+              <div class="claude-source-card">
+                <span>Модель та effort Claude</span>
+                <strong>Керується у поточному вікні Claude</strong>
+                <p>Селектор біля поля вводу є джерелом правди. Ця утиліта не перевизначає модель, effort або thinking Claude — вона вирішує, коли підключити Codex і з якими параметрами.</p>
+              </div>
+              <label class="field"><span>Поріг multi-file</span><div class="stepper"><button type="button" data-step="-1" data-target="fileThreshold">−</button><input id="fileThreshold" type="number" min="2" max="20" /><button type="button" data-step="1" data-target="fileThreshold">+</button></div></label>
+            </div>
+            <p class="field-note">До порогу Claude працює сам, якщо немає окремого ризикового тригера.</p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div><span class="section-no">02</span><div><h3>Перевірка плану перед кодом</h3><p class="section-description">Codex читає короткий план без права змінювати файли та вказує Claude на помилки.</p></div></div>
+              <label class="switch"><input id="planAuditEnabled" type="checkbox" /><span></span></label>
+            </div>
+            <div id="auditControls">
+              <div class="audit-flow" aria-label="Як працює перевірка плану">
+                <div><b>1</b><span><strong>Claude планує</strong><small>аналізує код і збирає докази</small></span></div>
+                <i>→</i>
+                <div><b>2</b><span><strong>Codex перевіряє</strong><small>тільки читає, не пише код</small></span></div>
+                <i>→</i>
+                <div><b>3</b><span><strong>Claude виправляє</strong><small>перевіряє зауваження і продовжує</small></span></div>
+              </div>
+
+              <p class="micro-heading">Коли запускати перевірку</p>
+              <div class="scenario-grid">
+                <label class="scenario-card"><input id="auditScope" type="checkbox" /><span><strong>Велика зміна</strong><small><b id="scopeThresholdText">4+</b> файли, кілька пакетів або сервісів.</small></span></label>
+                <label class="scenario-card critical"><input id="auditHighRisk" type="checkbox" /><span><strong>Високий ризик</strong><small>Auth, security, міграції, дані або інфраструктура.</small></span></label>
+                <label class="scenario-card"><input id="auditUnverified" type="checkbox" /><span><strong>Неперевірене припущення</strong><small>Важливу частину плану не вдалося підтвердити кодом чи тестом.</small></span></label>
+                <label class="scenario-card"><input id="auditAmbiguity" type="checkbox" /><span><strong>Немає очевидного рішення</strong><small>Claude бачить два підходи або не впевнений у root cause.</small></span></label>
+                <label class="scenario-card"><input id="auditExplicit" type="checkbox" /><span><strong>На моє прохання</strong><small>Запускати, коли користувач прямо просить незалежну перевірку.</small></span></label>
+              </div>
+
+              <p class="micro-heading separated">Хто перевіряє</p>
+              <div class="reviewer-table">
+                <div class="reviewer-row header"><span>Сценарій</span><span>Модель Codex</span><span>Effort</span></div>
+                <div class="reviewer-row"><span><strong>Звичайна перевірка</strong><small>велика або неоднозначна задача</small></span><select id="normalAuditModel" aria-label="Модель звичайної перевірки"><option value="gpt-5.6-luna">GPT-5.6 Luna</option><option value="gpt-5.6-terra">GPT-5.6 Terra</option><option value="gpt-5.6-sol">GPT-5.6 Sol</option></select><select id="normalAuditEffort" aria-label="Effort звичайної перевірки"><option>medium</option><option>high</option></select></div>
+                <div class="reviewer-row"><span><strong>Ризикова перевірка</strong><small>security, auth, data, infra</small></span><select id="highRiskAuditModel" aria-label="Модель ризикової перевірки"><option value="gpt-5.6-luna">GPT-5.6 Luna</option><option value="gpt-5.6-terra">GPT-5.6 Terra</option><option value="gpt-5.6-sol">GPT-5.6 Sol</option></select><select id="highRiskAuditEffort" aria-label="Effort ризикової перевірки"><option>medium</option><option>high</option></select></div>
+              </div>
+
+              <details class="advanced-settings">
+                <summary>Ліміти й поведінка при BLOCK</summary>
+                <div class="field-grid two compact">
+                  <label class="field"><span>Максимум контексту для Codex</span><div class="suffix"><input id="packetTokens" type="number" min="200" max="2000" /><i>tok</i></div><small>Claude стискає план до цього розміру.</small></label>
+                  <label class="field"><span>Максимум відповіді Codex</span><div class="suffix"><input id="responseTokens" type="number" min="150" max="1200" /><i>tok</i></div><small>Короткий verdict замість нового аналізу з нуля.</small></label>
+                </div>
+                <div class="option-stack">
+                  <label><input id="allowReaudit" type="checkbox" /><span><strong>Дозволити одну повторну перевірку після BLOCK</strong><small>Тільки якщо Claude суттєво переробив план.</small></span></label>
+                  <label><input id="skipNearLimit" type="checkbox" /><span><strong>Пропускати некритичну перевірку біля ліміту</strong><small>Security/auth/data перевірки все одно залишаються пріоритетними.</small></span></label>
+                </div>
+              </details>
+
+              <div class="audit-cost-note">
+                <strong>Бюджет:</strong> максимум одна звичайна перевірка плану. Повторна — лише після BLOCK і суттєвої зміни плану.
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading"><div><span class="section-no">03</span><h3>Codex executor</h3></div></div>
+            <div class="routing-table">
+              <div class="routing-row header"><span>Клас задачі</span><span>Модель</span><span>Effort</span></div>
+              <div class="routing-row"><strong><i class="risk-dot low"></i>Small / bounded</strong><select id="smallModel" aria-label="Модель для малих задач"><option value="gpt-5.6-luna">GPT-5.6 Luna</option><option value="gpt-5.6-terra">GPT-5.6 Terra</option><option value="gpt-5.6-sol">GPT-5.6 Sol</option></select><select id="smallEffort" aria-label="Effort для малих задач"><option>low</option><option>medium</option><option>high</option></select></div>
+              <div class="routing-row"><strong><i class="risk-dot mid"></i>Multi-file</strong><select id="normalModel" aria-label="Модель для multi-file задач"><option value="gpt-5.6-luna">GPT-5.6 Luna</option><option value="gpt-5.6-terra">GPT-5.6 Terra</option><option value="gpt-5.6-sol">GPT-5.6 Sol</option></select><select id="normalEffort" aria-label="Effort для multi-file задач"><option>low</option><option>medium</option><option>high</option></select></div>
+              <div class="routing-row"><strong><i class="risk-dot high"></i>High risk</strong><select id="riskModel" aria-label="Модель для ризикових задач"><option value="gpt-5.6-luna">GPT-5.6 Luna</option><option value="gpt-5.6-terra">GPT-5.6 Terra</option><option value="gpt-5.6-sol">GPT-5.6 Sol</option></select><select id="riskEffort" aria-label="Effort для ризикових задач"><option>low</option><option>medium</option><option>high</option></select></div>
+            </div>
+            <p class="field-note">Усі coding-маршрути використовують GPT-5.6. Моделей нижче GPT-5.5 у списку немає.</p>
+            <div class="field-grid two lower-fields">
+              <label class="field"><span>xhigh policy</span><select id="xhighPolicy"><option value="never">Never</option><option value="explicit">Explicit request only</option><option value="failed-or-explicit">Failed high or explicit</option></select></label>
+              <label class="field"><span>Post-implementation review</span><select id="postReview"><option value="off">Off</option><option value="risk-only">Risk / large diff only</option><option value="always">Always</option></select></label>
+            </div>
+          </section>
+
+          <section class="safety-card">
+            <div class="lock">⌁</div>
+            <div><strong>Subscription boundary locked</strong><p>API keys, custom endpoints і pay-as-you-go fallback завжди заборонені.</p></div>
+            <span>LOCKED</span>
+          </section>
+        </div>
+
+        <aside class="preview-column">
+          <section class="preview-panel">
+            <div class="preview-heading">
+              <div><span class="section-no">LIVE</span><h3>Generated policy</h3></div>
+              <button id="copyButton" class="icon-button" type="button" title="Copy preview">Copy</button>
+            </div>
+            <pre id="preview">Loading configuration…</pre>
+          </section>
+        </aside>
+      </section>
+
+      <section id="historyView" class="history-view" hidden>
+        <section class="panel history-panel">
+          <div class="history-heading">
+            <div>
+              <span class="section-no">LOCAL</span>
+              <div><h3>Історія задач і токенів</h3><p>Читайте локальні журнали Claude Code та Codex без відправлення даних назовні.</p></div>
+            </div>
+            <button id="refreshHistoryButton" class="icon-button" type="button">Refresh</button>
+          </div>
+
+          <section class="telemetry-card" aria-labelledby="telemetryTitle">
+            <div class="telemetry-main">
+              <span class="telemetry-icon" aria-hidden="true">↳</span>
+              <div>
+                <div class="telemetry-title-line">
+                  <h4 id="telemetryTitle">Лог рішень роутера</h4>
+                  <span id="telemetryStatus" class="telemetry-status muted">Перевіряємо…</span>
+                </div>
+                <p id="telemetryDescription">Фіксує лише тип рішення — Claude-only, delegated або audit — разом із моделлю, effort та результатом. Промпти й код не зберігаються.</p>
+                <div class="telemetry-paths">
+                  <span>HOOK <code id="telemetryLoggerPath">—</code></span>
+                  <span>LOG <code id="telemetryHistoryPath">—</code></span>
+                </div>
+              </div>
+            </div>
+            <div class="telemetry-actions">
+              <button id="installTelemetryButton" class="primary-small" type="button">Install logger</button>
+              <button id="repairTelemetryButton" class="secondary-small" type="button" hidden>Repair</button>
+              <button id="uninstallTelemetryButton" class="text-button danger" type="button" hidden>Uninstall</button>
+            </div>
+          </section>
+
+          <div class="routing-summary" aria-label="Рішення роутера">
+            <article><span>Claude-only</span><strong id="claudeOnlyCount">0</strong><small>без виклику Codex</small></article>
+            <article><span>Delegated</span><strong id="delegatedCount">0</strong><small>Codex виконує задачу</small></article>
+            <article><span>Audit</span><strong id="auditCount">0</strong><small>Codex перевіряє план</small></article>
+          </div>
+
+          <details class="routing-decisions" open>
+            <summary>Останні рішення роутера <span id="routingDecisionCount">0</span></summary>
+            <div class="decision-table" aria-live="polite">
+              <div class="decision-row header"><span>Рішення</span><span>Клас / модель</span><span>Результат</span><span>Час</span></div>
+              <div id="routingDecisionRows"></div>
+              <p id="routingDecisionEmpty" class="history-empty">Після встановлення логера рішення з’являться тут.</p>
+            </div>
+          </details>
+
+          <div class="usage-summary">
+            <article><span>Claude · показані сесії</span><strong id="claudeTokenTotal">—</strong><small id="claudeSessionCount">Завантаження…</small></article>
+            <article><span>Codex · показані сесії</span><strong id="codexTokenTotal">—</strong><small id="codexSessionCount">Завантаження…</small></article>
+            <article class="usage-note"><span>Що означають цифри</span><p>Це сирі token counters локальних клієнтів, а не гроші й не відсоток корпоративного ліміту. Кеш показано окремо.</p></article>
+          </div>
+
+          <div class="history-toolbar">
+            <div class="history-filters" role="group" aria-label="Фільтр історії">
+              <button class="active" type="button" data-history-filter="all">Усі</button>
+              <button type="button" data-history-filter="claude">Claude</button>
+              <button type="button" data-history-filter="codex">Codex</button>
+            </div>
+            <span id="historyUpdatedAt">—</span>
+          </div>
+
+          <div class="history-table" aria-live="polite">
+            <div class="history-row header"><span>Задача / сесія</span><span>Агент</span><span>Input</span><span>Cache</span><span>Output</span><span>Total</span><span>Оновлено</span></div>
+            <div id="historyRows"></div>
+            <p id="historyEmpty" class="history-empty" hidden>Локальних сесій з token counters не знайдено.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="savebar">
+      <div>
+        <span id="dirtyDot" class="dirty-dot"></span>
+        <p><strong id="saveState">No unsaved changes</strong><small>Backup is created before every save</small></p>
+      </div>
+      <button id="saveButton" class="save-button" type="button"><span>Apply routing policy</span><b>⌘ S</b></button>
+    </footer>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js?v=20260715-11" type="module"></script>
+  </body>
+</html>

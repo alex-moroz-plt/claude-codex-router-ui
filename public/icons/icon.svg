@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="Claude Codex Router">
+  <rect width="192" height="192" rx="38" fill="#f2f0e9"/>
+  <rect x="43" y="43" width="106" height="106" fill="none" stroke="#171815" stroke-width="6"/>
+  <path d="M46 46L146 146" stroke="#171815" stroke-width="6"/>
+  <text x="57" y="78" fill="#171815" font-family="ui-monospace, monospace" font-size="26" font-weight="800">C</text>
+  <text x="112" y="136" fill="#171815" font-family="ui-monospace, monospace" font-size="26" font-weight="800">X</text>
+  <circle cx="146" cy="46" r="8" fill="#ec6438"/>
+</svg>

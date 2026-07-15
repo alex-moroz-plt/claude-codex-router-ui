@@ -1,0 +1,53 @@
+{
+  "name": "claude-codex-router",
+  "version": "0.1.0",
+  "description": "Local macOS control panel for Claude Code to Codex delegation through the official Codex Claude plugin.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "claude-codex-router": "./bin/claude-codex-router.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ],
+  "keywords": [
+    "claude-code",
+    "codex",
+    "router",
+    "pwa",
+    "macos",
+    "ai-coding",
+    "developer-tools"
+  ],
+  "files": [
+    "bin/",
+    "public/app.js",
+    "public/index.html",
+    "public/manifest.webmanifest",
+    "public/styles.css",
+    "public/sw.js",
+    "public/icons/",
+    "scripts/build-portable-package.mjs",
+    "scripts/generate-icons.mjs",
+    "telemetry/",
+    "Build Portable Installer.command",
+    "Install Desktop PWA.command",
+    "Uninstall Background Service.command",
+    "start.command",
+    "server.mjs",
+    "setup-manager.mjs",
+    "telemetry-manager.mjs",
+    "usage-history.mjs",
+    "README.md",
+    "LICENSE",
+    "NPM_PUBLISH_CHECKLIST.md"
+  ],
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "pack:check": "npm pack --dry-run"
+  }
+}
