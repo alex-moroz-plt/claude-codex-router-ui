@@ -97,7 +97,7 @@ test("npm package metadata exposes an explicit CLI without publishing generated 
   assert.equal(pkg.license, "MIT");
   assert.deepEqual(pkg.bin, { "claude-codex-router": "bin/claude-codex-router.mjs" });
   assert.ok(pkg.files.includes("bin/"));
-  assert.ok(pkg.files.includes("NPM_PUBLISH_CHECKLIST.md"));
+  assert.ok(!pkg.files.includes("NPM_PUBLISH_CHECKLIST.md"));
   assert.equal(pkg.scripts.postinstall, undefined);
   assert.equal(pkg.scripts.prepare, undefined);
   assert.ok(pkg.files.every((entry) => !entry.startsWith("public/downloads")));

@@ -50,8 +50,7 @@
     "telemetry-manager.mjs",
     "usage-history.mjs",
     "README.md",
-    "LICENSE",
-    "NPM_PUBLISH_CHECKLIST.md"
+    "LICENSE"
   ],
   "scripts": {
     "start": "node server.mjs",
