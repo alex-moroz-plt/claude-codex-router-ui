@@ -8,6 +8,13 @@ LOG_DIR="$HOME/Library/Logs"
 URL="http://127.0.0.1:4177"
 NODE_VERSION="v22.13.1"
 RUNTIME_ROOT="$HOME/Library/Application Support/ClaudeCodexRouter/runtime"
+START_AT_LOGIN="${START_AT_LOGIN:-0}"
+
+for arg in "$@"; do
+  case "$arg" in
+    --start-at-login) START_AT_LOGIN=1 ;;
+  esac
+done
 
 find_node() {
   if command -v node >/dev/null 2>&1; then
@@ -75,8 +82,10 @@ plutil -create xml1 "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :ProgramArguments:1 string $APP_DIR/server.mjs" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :ProgramArguments:2 string --no-open" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :WorkingDirectory string $APP_DIR" "$PLIST"
-/usr/libexec/PlistBuddy -c "Add :RunAtLoad bool true" "$PLIST"
-/usr/libexec/PlistBuddy -c "Add :KeepAlive bool true" "$PLIST"
+if [[ "$START_AT_LOGIN" == "1" ]]; then
+  /usr/libexec/PlistBuddy -c "Add :RunAtLoad bool true" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Add :KeepAlive bool true" "$PLIST"
+fi
 /usr/libexec/PlistBuddy -c "Add :ProcessType string Background" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :ThrottleInterval integer 10" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :StandardOutPath string $LOG_DIR/ClaudeCodexRouterUI.log" "$PLIST"
@@ -111,4 +120,8 @@ else
   open "$URL"
 fi
 
-osascript -e 'display notification "Відкрий Setup from zero і пройди послідовні перевірки Claude → Codex." with title "Claude × Codex Router is running"'
+if [[ "$START_AT_LOGIN" == "1" ]]; then
+  osascript -e 'display notification "Start-at-login enabled. Відкрий Setup from zero і пройди перевірки Claude → Codex." with title "Claude × Codex Router is running"'
+else
+  osascript -e 'display notification "Start-at-login disabled. Відкрий Setup from zero і пройди перевірки Claude → Codex." with title "Claude × Codex Router is running"'
+fi

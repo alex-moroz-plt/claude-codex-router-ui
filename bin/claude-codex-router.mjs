@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync } from "node:fs";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -23,9 +23,13 @@ function usage() {
 
 Usage:
   claude-codex-router start [--no-open]   Start the local UI server in the foreground
-  claude-codex-router install             Install or repair the macOS background service
-  claude-codex-router uninstall           Remove only the macOS background service
-  claude-codex-router open                Open the local UI in the default browser
+  claude-codex-router install             Start the local UI now without installing a login service
+  claude-codex-router open                Start the local UI if needed, then open it in your browser
+  claude-codex-router service install     Install/repair the macOS service without start-at-login
+  claude-codex-router service install --start-at-login
+                                           Install the service with RunAtLoad and KeepAlive
+  claude-codex-router service uninstall   Remove only the macOS background service
+  claude-codex-router uninstall           Alias for service uninstall
   claude-codex-router doctor              Print local setup status
   claude-codex-router build-portable      Build public/downloads/Claude-Codex-Router-UI.zip
   claude-codex-router help                Show this help
@@ -71,7 +75,7 @@ async function buildPortable() {
   process.stdout.write(result.stdout);
 }
 
-async function writeLaunchAgent() {
+async function writeLaunchAgent({ startAtLogin = false } = {}) {
   if (process.platform !== "darwin") {
     throw new Error("Background service installation is currently supported on macOS only.");
   }
@@ -89,9 +93,7 @@ async function writeLaunchAgent() {
     <string>--no-open</string>
   </array>
   <key>WorkingDirectory</key><string>${xmlEscape(ROOT)}</string>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Background</string>
+${startAtLogin ? "  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n" : ""}  <key>ProcessType</key><string>Background</string>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>StandardOutPath</key><string>${xmlEscape(OUT_LOG)}</string>
   <key>StandardErrorPath</key><string>${xmlEscape(ERR_LOG)}</string>
@@ -100,6 +102,24 @@ async function writeLaunchAgent() {
 `;
   await writeFile(PLIST, plist, { encoding: "utf8", mode: 0o600 });
   run("/usr/bin/plutil", ["-lint", PLIST]);
+}
+
+async function ensureOnDemandServer() {
+  if (await healthCheck(500)) return;
+  await mkdir(LOG_DIR, { recursive: true });
+  const out = openSync(OUT_LOG, "a");
+  const err = openSync(ERR_LOG, "a");
+  const child = spawn(process.execPath, [path.join(ROOT, "server.mjs"), "--no-open"], {
+    cwd: ROOT,
+    detached: true,
+    stdio: ["ignore", out, err]
+  });
+  closeSync(out);
+  closeSync(err);
+  child.unref();
+  if (!(await healthCheck())) {
+    throw new Error(`Router did not start. Check ${ERR_LOG}. Another app may already use port ${PORT}.`);
+  }
 }
 
 async function bootService() {
@@ -135,7 +155,12 @@ async function doctor() {
   console.log(JSON.stringify({
     package: `${packageJson.name}@${packageJson.version}`,
     server: { url: URL, running: await healthCheck(500) },
-    macosService: { plist: PLIST, installed: existsSync(PLIST) },
+    macosService: {
+      plist: PLIST,
+      installed: existsSync(PLIST),
+      startAtLogin: existsSync(PLIST) ? (await readFile(PLIST, "utf8")).includes("<key>RunAtLoad</key>") : false,
+      keepAlive: existsSync(PLIST) ? (await readFile(PLIST, "utf8")).includes("<key>KeepAlive</key>") : false
+    },
     portableArchive: { path: archive, bytes: archiveInfo?.size || 0, present: Boolean(archiveInfo) },
     setup: {
       ready: status.progress.ready,
@@ -155,14 +180,31 @@ async function main() {
   if (command === "start") {
     await startServer({ port: PORT, openBrowser: !process.argv.includes("--no-open") });
   } else if (command === "install") {
-    await buildPortable();
-    await writeLaunchAgent();
-    await bootService();
+    await ensureOnDemandServer();
     await openUi();
     console.log(`Claude × Codex Router is running at ${URL}`);
+    console.log("No LaunchAgent was installed. Use `claude-codex-router service install --start-at-login` only if you explicitly want login persistence.");
+  } else if (command === "service") {
+    const serviceCommand = process.argv[3] || "help";
+    if (serviceCommand === "install") {
+      const startAtLogin = process.argv.includes("--start-at-login");
+      await writeLaunchAgent({ startAtLogin });
+      await bootService();
+      await openUi();
+      console.log(`Background service installed at ${PLIST}`);
+      console.log(startAtLogin
+        ? "Start-at-login is enabled with RunAtLoad and KeepAlive."
+        : "Start-at-login is disabled. RunAtLoad and KeepAlive were not written.");
+    } else if (serviceCommand === "uninstall") {
+      await uninstallService();
+    } else {
+      process.stderr.write(`Unknown service command: ${serviceCommand}\n\n${usage()}`);
+      process.exitCode = 1;
+    }
   } else if (command === "uninstall") {
     await uninstallService();
   } else if (command === "open") {
+    await ensureOnDemandServer();
     await openUi();
   } else if (command === "doctor") {
     await doctor();

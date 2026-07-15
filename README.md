@@ -39,12 +39,12 @@ Start the local app:
 claude-codex-router install
 ```
 
-This installs a small macOS background service and opens the setup UI in your browser.
+This starts the local UI and opens it in your browser. It does not install a background service and does not configure start-at-login.
 
 You can also run it once without installing globally:
 
 ```bash
-npx @alex_moroz/claude-codex-router start
+npx @alex_moroz/claude-codex-router open
 ```
 
 ## First Setup
@@ -79,6 +79,8 @@ Open the UI at any time:
 claude-codex-router open
 ```
 
+`open` starts the local UI if it is not already running. It does not create a LaunchAgent.
+
 Check local status:
 
 ```bash
@@ -88,13 +90,34 @@ claude-codex-router doctor
 ## Commands
 
 ```bash
-claude-codex-router install        # install/repair the local background service and open the UI
-claude-codex-router start          # run the UI server in the foreground
-claude-codex-router open           # open the UI in your browser
-claude-codex-router doctor         # print local setup status
-claude-codex-router uninstall      # remove the background service only
-claude-codex-router build-portable # build a local ZIP installer
+claude-codex-router install                         # start the UI now; no login service
+claude-codex-router open                            # start the UI if needed, then open it
+claude-codex-router start                           # run the UI server in the foreground
+claude-codex-router doctor                          # print local setup status
+claude-codex-router service install                 # install a macOS service without start-at-login
+claude-codex-router service install --start-at-login # opt in to RunAtLoad + KeepAlive
+claude-codex-router service uninstall               # remove the background service only
+claude-codex-router uninstall                       # alias for service uninstall
+claude-codex-router build-portable                  # build a local ZIP installer
 ```
+
+## Optional Start at Login
+
+By default, this package does not install persistence.
+
+If you explicitly want the router to start when you log in, run:
+
+```bash
+claude-codex-router service install --start-at-login
+```
+
+This creates a per-user macOS LaunchAgent with `RunAtLoad=true` and `KeepAlive=true`:
+
+```text
+~/Library/LaunchAgents/com.local.claude-codex-router-ui.plist
+```
+
+For corporate machines, use the default `install` or `open` command unless your security policy allows user LaunchAgents.
 
 ## What Gets Changed
 
@@ -109,6 +132,8 @@ The tool may create or update:
 ~/Library/LaunchAgents/com.local.claude-codex-router-ui.plist
 ```
 
+The LaunchAgent is created only when you run a `service install` command.
+
 Before overwriting routing policy or Claude settings, it creates backups.
 
 It does not use API keys, does not require `sudo`, and does not send prompts or source code to a separate logging service.
@@ -118,7 +143,7 @@ It does not use API keys, does not require `sudo`, and does not send prompts or 
 Remove the background service:
 
 ```bash
-claude-codex-router uninstall
+claude-codex-router service uninstall
 ```
 
 This keeps routing files, backups, and local history.

@@ -102,9 +102,11 @@ test("npm package metadata exposes an explicit CLI without publishing generated 
   assert.equal(pkg.scripts.prepare, undefined);
   assert.ok(pkg.files.every((entry) => !entry.startsWith("public/downloads")));
   assert.match(cli, /^#!\/usr\/bin\/env node/);
-  for (const command of ["start", "install", "uninstall", "doctor", "build-portable"]) {
+  for (const command of ["start", "install", "service", "uninstall", "open", "doctor", "build-portable"]) {
     assert.match(cli, new RegExp(`command === "${command}"`));
   }
+  assert.match(cli, /--start-at-login/);
+  assert.match(cli, /No LaunchAgent was installed/);
 });
 
 test("service worker keeps API calls network-only", async () => {
@@ -152,6 +154,18 @@ test("zero-setup wizard explains every layer and the bootstrap can install a ver
   assert.match(installer, /shasum -a 256 -c/);
   assert.match(installer, /Application Support\/ClaudeCodexRouter\/runtime/);
   assert.doesNotMatch(installer, /sudo/);
+  assert.match(installer, /--start-at-login\) START_AT_LOGIN=1/);
+  assert.match(installer, /if \[\[ "\$START_AT_LOGIN" == "1" \]\]/);
+});
+
+test("start-at-login persistence is explicit opt-in", async () => {
+  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  const cli = await readFile(path.join(root, "bin", "claude-codex-router.mjs"), "utf8");
+  const installer = await readFile(path.join(root, "Install Desktop PWA.command"), "utf8");
+  assert.match(cli, /startAtLogin = process\.argv\.includes\("--start-at-login"\)/);
+  assert.match(cli, /startAtLogin \? "  <key>RunAtLoad<\/key><true\/>\\n  <key>KeepAlive<\/key><true\/>\\n" : ""/);
+  assert.match(installer, /START_AT_LOGIN="\$\{START_AT_LOGIN:-0\}"/);
+  assert.match(installer, /if \[\[ "\$START_AT_LOGIN" == "1" \]\]; then[\s\S]+Add :RunAtLoad bool true[\s\S]+Add :KeepAlive bool true[\s\S]+fi/);
 });
 
 test("local Claude and Codex token counters are summarized without double counting", () => {
