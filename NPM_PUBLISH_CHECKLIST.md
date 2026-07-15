@@ -13,37 +13,38 @@
 
 ## Human steps before first publish
 
-- [ ] Decide whether to keep the unscoped name `claude-codex-router` or move to a personal/org scope such as `@alex-moroz/claude-codex-router`.
-- [ ] If using a scope, create or verify the npm user/org scope.
+- [x] Package name is scoped as `@alex_moroz/claude-codex-router`.
+- [ ] Verify the npm account can publish under the `@alex_moroz` scope.
 - [ ] Add real `repository`, `homepage`, and `bugs` fields after the public GitHub repo exists.
 - [ ] Review the README for public wording and screenshots.
 - [ ] Log in to npm: `npm login`.
 - [ ] Confirm account: `npm whoami`.
+- [ ] Enable npm 2FA for publishing or prepare a granular access token that can publish.
 - [ ] Re-run `npm test`.
 - [ ] Re-run `npm pack --dry-run`.
 - [ ] Publish:
 
 ```bash
-npm publish
+npm publish --access public
 ```
 
-For a scoped public package, publish with:
+If npm asks for a one-time password or returns `E403 Two-factor authentication ... is required`, publish with the current authenticator code:
 
 ```bash
-npm publish --access public
+npm publish --access public --otp=123456
 ```
 
 ## Post-publish smoke test
 
 ```bash
-npx claude-codex-router doctor
-npx claude-codex-router start
+npx @alex_moroz/claude-codex-router doctor
+npx @alex_moroz/claude-codex-router start
 ```
 
 For a global install:
 
 ```bash
-npm i -g claude-codex-router
+npm i -g @alex_moroz/claude-codex-router
 claude-codex-router install
 claude-codex-router doctor
 ```

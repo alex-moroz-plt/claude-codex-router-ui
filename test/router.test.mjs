@@ -92,10 +92,10 @@ test("npm package metadata exposes an explicit CLI without publishing generated 
   const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
   const pkg = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   const cli = await readFile(path.join(root, "bin", "claude-codex-router.mjs"), "utf8");
-  assert.equal(pkg.name, "claude-codex-router");
+  assert.equal(pkg.name, "@alex_moroz/claude-codex-router");
   assert.equal(pkg.private, undefined);
   assert.equal(pkg.license, "MIT");
-  assert.deepEqual(pkg.bin, { "claude-codex-router": "./bin/claude-codex-router.mjs" });
+  assert.deepEqual(pkg.bin, { "claude-codex-router": "bin/claude-codex-router.mjs" });
   assert.ok(pkg.files.includes("bin/"));
   assert.ok(pkg.files.includes("NPM_PUBLISH_CHECKLIST.md"));
   assert.equal(pkg.scripts.postinstall, undefined);
