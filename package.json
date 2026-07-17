@@ -1,6 +1,6 @@
 {
   "name": "@alex_moroz/claude-codex-router",
-  "version": "0.1.1",
+  "version": "0.2.2",
   "description": "Local macOS control panel for Claude Code to Codex delegation through the official Codex Claude plugin.",
   "type": "module",
   "license": "MIT",

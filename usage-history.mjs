@@ -50,6 +50,52 @@ function modelLabel(models) {
   return `${values.slice(0, 2).join(" + ")} +${values.length - 2}`;
 }
 
+function normalizeRateLimitWindow(value) {
+  if (!value || typeof value !== "object") return null;
+  const rawUsedPercent = value.used_percent ?? value.usedPercent;
+  const usedPercent = Number(rawUsedPercent);
+  if (rawUsedPercent == null || !Number.isFinite(usedPercent)) return null;
+  const rawWindowMinutes = value.window_minutes ?? value.windowDurationMins;
+  const windowMinutes = Number(rawWindowMinutes);
+  const rawResetsAt = value.resets_at ?? value.resetsAt;
+  const resetsAtSeconds = Number(rawResetsAt);
+  const resetsAtMs = Number.isFinite(resetsAtSeconds)
+    ? (resetsAtSeconds > 10_000_000_000 ? resetsAtSeconds : resetsAtSeconds * 1000)
+    : 0;
+  return {
+    usedPercent: Math.max(0, Math.min(100, usedPercent)),
+    remainingPercent: Math.max(0, Math.min(100, 100 - usedPercent)),
+    windowMinutes: Number.isFinite(windowMinutes) && windowMinutes > 0 ? windowMinutes : null,
+    resetsAt: resetsAtMs ? new Date(resetsAtMs).toISOString() : null
+  };
+}
+
+function codexRateLimitsFromRecord(record) {
+  if (record?.type !== "event_msg" || record.payload?.type !== "token_count") return null;
+  const value = record.payload.rate_limits;
+  if (!value || typeof value !== "object") return null;
+  const windows = [value.primary, value.secondary].map(normalizeRateLimitWindow).filter(Boolean);
+  if (!windows.length) return null;
+  const observedAtValue = timestampValue(record.timestamp);
+  return {
+    limitId: typeof value.limit_id === "string" ? value.limit_id : null,
+    limitName: typeof value.limit_name === "string" ? value.limit_name : null,
+    planType: typeof value.plan_type === "string" ? value.plan_type : null,
+    observedAt: observedAtValue ? new Date(observedAtValue).toISOString() : null,
+    windows
+  };
+}
+
+export function summarizeCodexRateLimits(records) {
+  let latest = null;
+  for (const record of records) {
+    const snapshot = codexRateLimitsFromRecord(record);
+    if (!snapshot) continue;
+    if (!latest || timestampValue(snapshot.observedAt) >= timestampValue(latest.observedAt)) latest = snapshot;
+  }
+  return latest;
+}
+
 export function summarizeClaudeRecords(records, filePath = "claude-session.jsonl") {
   const usage = { input: 0, cached: 0, output: 0, total: 0 };
   const models = new Set();
@@ -197,7 +243,7 @@ async function collectJsonlFiles(root, exclude = () => false) {
   return files;
 }
 
-async function recentFiles(root, limit, exclude) {
+async function recentFiles(root, limit, exclude, fromValue = 0, toValue = 0) {
   const paths = await collectJsonlFiles(root, exclude);
   const withTimes = await Promise.all(paths.map(async (filePath) => {
     try {
@@ -207,7 +253,11 @@ async function recentFiles(root, limit, exclude) {
       return null;
     }
   }));
-  return withTimes.filter(Boolean).sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, limit).map((entry) => entry.filePath);
+  return withTimes
+    .filter((entry) => entry && (!fromValue || entry.mtimeMs >= fromValue) && (!toValue || entry.mtimeMs < toValue))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, limit)
+    .map((entry) => entry.filePath);
 }
 
 async function parseJsonl(filePath, summarizer) {
@@ -223,6 +273,22 @@ async function parseJsonl(filePath, summarizer) {
     }
   }
   return summarizer(records, filePath);
+}
+
+async function parseCodexRateLimits(filePath) {
+  let latest = null;
+  const input = createReadStream(filePath, { encoding: "utf8" });
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
+  for await (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const snapshot = codexRateLimitsFromRecord(JSON.parse(line));
+      if (snapshot && (!latest || timestampValue(snapshot.observedAt) >= timestampValue(latest.observedAt))) latest = snapshot;
+    } catch {
+      // A partially written final JSONL line should not hide earlier snapshots.
+    }
+  }
+  return latest;
 }
 
 async function parseInBatches(files, summarizer, concurrency = 4) {
@@ -243,22 +309,50 @@ async function parseInBatches(files, summarizer, concurrency = 4) {
   return results;
 }
 
+async function latestCodexRateLimits(files, concurrency = 4) {
+  const results = [];
+  let cursor = 0;
+  async function worker() {
+    while (cursor < files.length) {
+      const index = cursor++;
+      try {
+        const result = await parseCodexRateLimits(files[index]);
+        if (result) results.push(result);
+      } catch {
+        // Rate-limit state is best-effort and must not hide token history.
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, () => worker()));
+  return results.sort((left, right) => timestampValue(right.observedAt) - timestampValue(left.observedAt))[0] || null;
+}
+
 export async function getUsageHistory({
   limit = 20,
+  from = null,
+  to = null,
   claudeRoot = process.env.CLAUDE_PROJECTS_DIR || DEFAULT_CLAUDE_ROOT,
   codexRoot = process.env.CODEX_SESSIONS_DIR || DEFAULT_CODEX_ROOT
 } = {}) {
-  const boundedLimit = Math.max(1, Math.min(50, Number(limit) || 20));
-  const candidateCount = Math.max(boundedLimit, 20);
-  const [claudeFiles, codexFiles] = await Promise.all([
-    recentFiles(claudeRoot, candidateCount, (filePath) => filePath.split(path.sep).includes("subagents")),
-    recentFiles(codexRoot, candidateCount, () => false)
+  const boundedLimit = Math.max(1, Math.min(200, Number(limit) || 20));
+  const fromValue = timestampValue(from);
+  const toValue = timestampValue(to);
+  const candidateCount = Math.max(boundedLimit * 2, 50);
+  const [claudeFiles, codexFiles, codexRateLimitFiles] = await Promise.all([
+    recentFiles(claudeRoot, candidateCount, (filePath) => filePath.split(path.sep).includes("subagents"), fromValue, toValue),
+    recentFiles(codexRoot, candidateCount, () => false, fromValue, toValue),
+    recentFiles(codexRoot, 12, () => false)
   ]);
-  const [claude, codex] = await Promise.all([
+  const [claude, codex, codexLimits] = await Promise.all([
     parseInBatches(claudeFiles, summarizeClaudeRecords),
-    parseInBatches(codexFiles, summarizeCodexRecords)
+    parseInBatches(codexFiles, summarizeCodexRecords),
+    latestCodexRateLimits(codexRateLimitFiles)
   ]);
   const items = [...claude, ...codex]
+    .filter((item) => {
+      const value = timestampValue(item.updatedAt);
+      return (!fromValue || value >= fromValue) && (!toValue || value < toValue);
+    })
     .sort((a, b) => timestampValue(b.updatedAt) - timestampValue(a.updatedAt))
     .slice(0, boundedLimit);
 
@@ -273,8 +367,10 @@ export async function getUsageHistory({
 
   return {
     generatedAt: new Date().toISOString(),
+    range: { from: fromValue ? new Date(fromValue).toISOString() : null, to: toValue ? new Date(toValue).toISOString() : null },
     items,
     totals,
-    note: "Local client counters, not billing or subscription quota units. Claude cache tokens are added to total processed tokens; Codex cached input is already included in input and total."
+    codexLimits,
+    note: "Local token counters are separate from the Codex account limit snapshot. Claude cache tokens are added to total processed tokens; Codex cached input is already included in input and total."
   };
 }

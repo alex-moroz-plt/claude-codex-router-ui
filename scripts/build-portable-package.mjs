@@ -17,12 +17,15 @@ try {
       const relative = path.relative(ROOT, source);
       if (!relative) return true;
       if (relative === ".DS_Store" || relative.endsWith(`${path.sep}.DS_Store`)) return false;
+      const topLevel = relative.split(path.sep)[0];
+      if ([".git", ".idea", "node_modules"].includes(topLevel)) return false;
+      if (relative.endsWith(".tgz")) return false;
       if (relative === "public/downloads" || relative.startsWith(`public/downloads${path.sep}`)) return false;
       return true;
     }
   });
   await mkdir(DOWNLOAD_DIR, { recursive: true });
-  const result = spawnSync("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", packageDir, ARCHIVE_PATH], {
+  const result = spawnSync("/usr/bin/ditto", ["-c", "-k", "--norsrc", "--noextattr", "--keepParent", packageDir, ARCHIVE_PATH], {
     encoding: "utf8"
   });
   if (result.status !== 0) throw new Error(result.stderr || "Could not build portable archive");

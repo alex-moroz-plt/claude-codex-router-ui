@@ -7,8 +7,10 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getUsageHistory } from "./usage-history.mjs";
 import {
+  findDelegatedTaskControl,
   getTelemetryStatus,
   installTelemetry,
+  readDelegatedTasks,
   readRoutingTelemetry,
   uninstallTelemetry
 } from "./telemetry-manager.mjs";
@@ -17,6 +19,7 @@ import {
   getSetupStatus,
   installBridgePlugin,
   launchSetupTerminalAction,
+  runCommand,
   runBridgeSelfCheck
 } from "./setup-manager.mjs";
 
@@ -30,11 +33,113 @@ const REQUEST_LIMIT = 64 * 1024;
 const META_START = "<!-- ROUTING_UI_CONFIG\n";
 const META_END = "\nROUTING_UI_CONFIG -->";
 
+function companionEnvironment(task) {
+  const env = { ...process.env };
+  for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL"]) {
+    delete env[key];
+  }
+  if (task.pluginDataDir) env.CLAUDE_PLUGIN_DATA = task.pluginDataDir;
+  else delete env.CLAUDE_PLUGIN_DATA;
+  if (task.sessionId) env.CODEX_COMPANION_SESSION_ID = task.sessionId;
+  return env;
+}
+
+function launchDetached(command, args, options) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { ...options, detached: true, stdio: "ignore", windowsHide: true });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve({ pid: child.pid ?? null });
+    });
+  });
+}
+
+export async function cancelDelegatedTask(id, {
+  findTask = findDelegatedTaskControl,
+  getStatus = getSetupStatus,
+  run = runCommand,
+  nodePath = process.execPath
+} = {}) {
+  const task = await findTask(id);
+  if (!task) throw new Error("Active delegated task was not found");
+  const status = await getStatus();
+  const companionPath = status.plugin?.companionPath;
+  if (!companionPath || !status.plugin?.companionAvailable) {
+    throw new Error("Codex companion is unavailable; repair the bridge first");
+  }
+  const env = companionEnvironment(task);
+  const result = await run(nodePath, [companionPath, "cancel", task.id, "--json", "--cwd", task.workspaceRoot], {
+    cwd: task.workspaceRoot,
+    env,
+    timeout: 30_000
+  });
+  if (result.code !== 0) throw new Error(result.stderr || result.stdout || "Could not cancel delegated task");
+  let payload = null;
+  try { payload = JSON.parse(result.stdout); } catch { /* The companion may emit a plain-text success report. */ }
+  return {
+    taskId: task.id,
+    status: payload?.status || "cancelled"
+  };
+}
+
+export async function retryDelegatedTask(id, {
+  findTask = findDelegatedTaskControl,
+  getStatus = getSetupStatus,
+  run = runCommand,
+  launch = launchDetached,
+  nodePath = process.execPath
+} = {}) {
+  const task = await findTask(id);
+  if (!task) throw new Error("Active delegated task was not found");
+  if (!task.stalled) throw new Error("Only a stale delegated task can be retried");
+  if (!task.canRetry) throw new Error("The original task request is unavailable and cannot be retried safely");
+  const status = await getStatus();
+  const companionPath = status.plugin?.companionPath;
+  if (!companionPath || !status.plugin?.companionAvailable) {
+    throw new Error("Codex companion is unavailable; repair the bridge first");
+  }
+  const env = companionEnvironment(task);
+  const cancelled = await run(nodePath, [companionPath, "cancel", task.id, "--json", "--cwd", task.workspaceRoot], {
+    cwd: task.workspaceRoot,
+    env,
+    timeout: 30_000
+  });
+  if (cancelled.code !== 0) throw new Error(cancelled.stderr || cancelled.stdout || "Could not prepare stale task for retry");
+  if (task.retryMode === "resume") {
+    const args = [companionPath, "task", "--background", "--resume", "--json", "--cwd", task.workspaceRoot];
+    if (task.model) args.push("--model", task.model);
+    if (task.effort) args.push("--effort", task.effort);
+    if (task.write) args.push("--write");
+    const resumed = await run(nodePath, args, { cwd: task.workspaceRoot, env, timeout: 30_000 });
+    if (resumed.code !== 0) throw new Error(resumed.stderr || resumed.stdout || "Could not resume stale task");
+    let payload = null;
+    try { payload = JSON.parse(resumed.stdout); } catch { /* The companion may emit a plain-text launch report. */ }
+    return {
+      taskId: payload?.jobId || task.id,
+      sourceTaskId: task.id,
+      status: payload?.status || "queued",
+      retryMode: "resume"
+    };
+  }
+  const worker = await launch(nodePath, [companionPath, "task-worker", "--cwd", task.workspaceRoot, "--job-id", task.id], {
+    cwd: task.workspaceRoot,
+    env
+  });
+  return {
+    taskId: task.id,
+    status: "retrying",
+    pid: worker?.pid ?? null,
+    retryMode: "replay"
+  };
+}
+
 export const DEFAULT_CONFIG = Object.freeze({
-  version: 1,
+  version: 2,
   costProfile: "balanced",
   claudeModel: "opusplan",
   fileThreshold: 4,
+  implementationFileThreshold: 3,
   planAuditEnabled: true,
   auditScope: true,
   auditHighRisk: true,
@@ -68,6 +173,7 @@ const POST_REVIEW_POLICIES = new Set(["off", "risk-only", "always"]);
 const COST_PROFILES = new Set(["economy", "balanced", "strict", "custom"]);
 const CLAUDE_MODELS = new Set(["fable", "opusplan", "opus", "sonnet"]);
 const CODEX_MODELS = new Set(["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]);
+const PROFILE_IMPLEMENTATION_THRESHOLDS = Object.freeze({ economy: 5, balanced: 3, strict: 2, custom: 3 });
 
 function intInRange(value, min, max, name) {
   if (!Number.isInteger(value) || value < min || value > max) {
@@ -81,7 +187,14 @@ export function validateConfig(input) {
     throw new Error("Config must be an object");
   }
 
-  const config = { ...DEFAULT_CONFIG, ...input, version: 1, subscriptionOnly: true };
+  const profile = typeof input.costProfile === "string" ? input.costProfile : DEFAULT_CONFIG.costProfile;
+  const config = {
+    ...DEFAULT_CONFIG,
+    ...input,
+    implementationFileThreshold: input.implementationFileThreshold ?? PROFILE_IMPLEMENTATION_THRESHOLDS[profile] ?? DEFAULT_CONFIG.implementationFileThreshold,
+    version: 2,
+    subscriptionOnly: true
+  };
   if (!COST_PROFILES.has(config.costProfile)) throw new Error("costProfile is invalid");
   const boolKeys = [
     "planAuditEnabled", "auditScope", "auditHighRisk", "auditUnverified",
@@ -96,6 +209,7 @@ export function validateConfig(input) {
     if (!CODEX_MODELS.has(config[key])) throw new Error(`${key} must be a GPT-5.6 model`);
   }
   intInRange(config.fileThreshold, 2, 20, "fileThreshold");
+  intInRange(config.implementationFileThreshold, 2, 20, "implementationFileThreshold");
   intInRange(config.packetTokens, 200, 2000, "packetTokens");
   intInRange(config.responseTokens, 150, 1200, "responseTokens");
   intInRange(config.normalAudits, 0, 2, "normalAudits");
@@ -139,11 +253,11 @@ export function generateRules(rawConfig) {
   const auditSection = config.planAuditEnabled ? `
 ## Economical analysis and plan audit
 
-Claude owns the initial repository analysis and implementation plan. Before editing, request a read-only Codex plan audit only when at least one enabled trigger applies:
+Claude owns the initial repository analysis and implementation plan. Before editing, request a read-only Codex plan audit whenever at least one enabled trigger applies:
 
 ${triggerLines(config)}
 
-Skip the audit for explanations, documentation-only work, obvious mechanical changes, or plans whose key assumptions Claude directly verified. A scope trigger does not override the mechanical-change exception.
+Skip the audit only for read-only explanations, documentation-only work, or a single obvious low-risk operation below the configured scope threshold. A built-in Explore or Plan subagent may gather evidence, but it never substitutes for a qualifying independent Codex audit. Re-evaluate the audit triggers immediately after exploration returns.
 
 For a qualifying audit:
 
@@ -179,21 +293,37 @@ Use Claude Code as the single user interface and choose the executor automatical
 - If a subscription is unavailable or its limit is reached, use the other subscribed agent when appropriate; otherwise report the limit instead of enabling billed API usage.
 - Organization and repository data-handling rules override this routing policy. Never send code to OpenAI when a managed or project rule forbids it.
 
-## Keep work in Claude when
+## Mandatory routing gate
 
-- The request is conversational, exploratory, architectural, product-oriented, or needs frequent clarification.
-- The change is small enough to complete safely in the current Claude turn.
-- Claude is planning an ambiguous or high-impact change before implementation.
+At the start of every user turn, after any Explore or Plan subagent returns, and again before the first file edit:
+
+1. Estimate the implementation scope by distinct files and architectural layers.
+2. Classify the work as Claude-only, Codex plan audit, Codex implementation, or both audit then implementation.
+3. Apply the numeric thresholds below as requirements, not suggestions. When scope is uncertain, use the higher class.
+4. A built-in Claude Explore, Plan, or general-purpose subagent does not count as Codex involvement.
+5. If a qualifying Codex route is skipped because Codex is unavailable, a subscription limit is reached, or data policy forbids it, state that reason explicitly. Do not silently keep qualifying work in Claude.
+6. The local hook may deny the threshold-reaching Edit or Write once. Treat that denial as a routing checkpoint: delegate or resume through \`codex:codex-rescue\`; retry directly only after stating a concrete allowed skip reason.
+
+## Keep work in Claude only when
+
+- The request is conversational, read-only, exploratory, architectural, or product-oriented and no implementation is requested.
+- A low-risk implementation is expected to touch fewer than ${config.implementationFileThreshold} files, stays within one architectural layer, and Claude has not already made an unsuccessful attempt.
+- Claude is gathering the minimum evidence needed to prepare a qualifying Codex audit or implementation packet.
 
 Use the Claude model, effort, and thinking settings selected in the current Claude UI. This routing policy does not override the active Claude session picker. Plan uncertain or high-impact work before editing.
 ${auditSection}
-## Delegate implementation to Codex when
+## Delegate implementation to Codex
 
-- The task is a bounded implementation spanning several files.
-- There are failing tests, logs, a reproducible bug, or a clear diagnosis target.
-- The work is a mechanical repository-wide refactor or migration.
-- Independent implementation or review is likely to catch mistakes.
-- Claude is stuck or has already made one unsuccessful attempt.
+Delegation is mandatory when any of these conditions applies:
+
+- The implementation is expected to touch ${config.implementationFileThreshold} or more distinct files.
+- The implementation crosses two or more architectural layers such as UI plus state, state plus API, frontend plus backend, or code plus persistent schema.
+- The task is a bounded repository-wide refactor, migration, or repeated mechanical change.
+- A reproducible bug, failing validation, or clear diagnosis target requires a multi-step coding pass.
+- Claude has already made one unsuccessful implementation attempt, the user reports the fix is still wrong, or a corrective follow-up materially changes the approach.
+- Independent implementation or review is likely to catch mistakes in a risky or large diff.
+
+Do not wait for the user to ask for Codex when one of these conditions is already true. A later clarification that stays inside an active delegated task should continue or resume that Codex task instead of silently switching back to Claude implementation.
 
 Delegate through the installed \`codex:codex-rescue\` subagent. Do not duplicate the same implementation in both agents unless one is explicitly the reviewer.
 
@@ -446,11 +576,35 @@ function createHandler(port) {
       }
       if (url.pathname === "/api/history" && request.method === "GET") {
         const limit = Number(url.searchParams.get("limit")) || 20;
+        const from = url.searchParams.get("from");
+        const to = url.searchParams.get("to");
+        if ((from && !Number.isFinite(Date.parse(from))) || (to && !Number.isFinite(Date.parse(to)))) {
+          sendJson(response, 400, { error: "Invalid history date range" });
+          return;
+        }
         const [history, routing] = await Promise.all([
-          getUsageHistory({ limit }),
-          readRoutingTelemetry({ limit: 50 })
+          getUsageHistory({ limit, from, to }),
+          readRoutingTelemetry({ limit: 200, from, to })
         ]);
         sendJson(response, 200, { ...history, routing });
+        return;
+      }
+      if (url.pathname === "/api/delegated-tasks" && request.method === "GET") {
+        sendJson(response, 200, await readDelegatedTasks());
+        return;
+      }
+      if (url.pathname === "/api/delegated-tasks/cancel" && request.method === "POST") {
+        if (request.headers.origin && !allowedOrigins.has(request.headers.origin)) return sendJson(response, 403, { error: "Origin rejected" });
+        const body = await readJson(request);
+        const result = await cancelDelegatedTask(body.id);
+        sendJson(response, 200, { ...result, live: await readDelegatedTasks() });
+        return;
+      }
+      if (url.pathname === "/api/delegated-tasks/retry" && request.method === "POST") {
+        if (request.headers.origin && !allowedOrigins.has(request.headers.origin)) return sendJson(response, 403, { error: "Origin rejected" });
+        const body = await readJson(request);
+        const result = await retryDelegatedTask(body.id);
+        sendJson(response, 200, result);
         return;
       }
       if (url.pathname === "/api/telemetry/status" && request.method === "GET") {

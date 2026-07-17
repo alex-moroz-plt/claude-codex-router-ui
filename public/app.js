@@ -1,12 +1,12 @@
 const fieldIds = [
-  "fileThreshold", "planAuditEnabled", "auditScope", "auditHighRisk",
+  "fileThreshold", "implementationFileThreshold", "planAuditEnabled", "auditScope", "auditHighRisk",
   "auditUnverified", "auditAmbiguity", "auditExplicit", "packetTokens", "responseTokens",
   "normalAuditModel", "highRiskAuditModel", "normalAuditEffort", "highRiskAuditEffort",
   "allowReaudit", "skipNearLimit", "smallModel", "normalModel", "riskModel", "smallEffort",
   "normalEffort", "riskEffort", "xhighPolicy", "postReview"
 ];
 
-const numericFields = new Set(["fileThreshold", "packetTokens", "responseTokens"]);
+const numericFields = new Set(["fileThreshold", "implementationFileThreshold", "packetTokens", "responseTokens"]);
 const checkboxFields = new Set([
   "planAuditEnabled", "auditScope", "auditHighRisk", "auditUnverified", "auditAmbiguity",
   "auditExplicit", "allowReaudit", "skipNearLimit"
@@ -14,21 +14,21 @@ const checkboxFields = new Set([
 
 const presets = {
   economy: {
-    fileThreshold: 6, packetTokens: 450, responseTokens: 300, normalAuditEffort: "medium",
+    fileThreshold: 6, implementationFileThreshold: 5, packetTokens: 450, responseTokens: 300, normalAuditEffort: "medium",
     highRiskAuditEffort: "high", normalAuditModel: "gpt-5.6-terra", highRiskAuditModel: "gpt-5.6-sol",
     allowReaudit: false, skipNearLimit: true, smallModel: "gpt-5.6-luna", normalModel: "gpt-5.6-terra",
     riskModel: "gpt-5.6-sol", smallEffort: "medium", normalEffort: "medium", riskEffort: "high",
     xhighPolicy: "explicit", postReview: "off"
   },
   balanced: {
-    fileThreshold: 4, packetTokens: 600, responseTokens: 400, normalAuditEffort: "medium",
+    fileThreshold: 4, implementationFileThreshold: 3, packetTokens: 600, responseTokens: 400, normalAuditEffort: "medium",
     highRiskAuditEffort: "high", normalAuditModel: "gpt-5.6-terra", highRiskAuditModel: "gpt-5.6-sol",
     allowReaudit: true, skipNearLimit: true, smallModel: "gpt-5.6-luna", normalModel: "gpt-5.6-terra",
     riskModel: "gpt-5.6-sol", smallEffort: "medium", normalEffort: "high", riskEffort: "high",
     xhighPolicy: "failed-or-explicit", postReview: "risk-only"
   },
   strict: {
-    fileThreshold: 3, packetTokens: 700, responseTokens: 500, normalAuditEffort: "high",
+    fileThreshold: 3, implementationFileThreshold: 2, packetTokens: 700, responseTokens: 500, normalAuditEffort: "high",
     highRiskAuditEffort: "high", normalAuditModel: "gpt-5.6-sol", highRiskAuditModel: "gpt-5.6-sol",
     allowReaudit: true, skipNearLimit: false, smallModel: "gpt-5.6-terra", normalModel: "gpt-5.6-sol",
     riskModel: "gpt-5.6-sol", smallEffort: "high", normalEffort: "high", riskEffort: "high",
@@ -52,6 +52,9 @@ let installPrompt = null;
 let historyLoaded = false;
 let historyItems = [];
 let historyFilter = "all";
+let historyPeriod = "today";
+let delegatedTasksBusy = false;
+let delegatedPollTimer = null;
 let activeCostProfile = "balanced";
 let telemetryBusy = false;
 let setupLoaded = false;
@@ -60,7 +63,7 @@ let setupPollTimer = null;
 let initialViewResolved = false;
 
 function readForm() {
-  const config = { version: 1, costProfile: activeCostProfile, subscriptionOnly: true, normalAudits: 1 };
+  const config = { version: 2, costProfile: activeCostProfile, subscriptionOnly: true, normalAudits: 1 };
   for (const id of fieldIds) {
     if (checkboxFields.has(id)) config[id] = elements[id].checked;
     else if (numericFields.has(id)) config[id] = Number(elements[id].value);
@@ -85,6 +88,7 @@ function syncAuditState() {
 
 function syncDynamicLabels() {
   document.getElementById("scopeThresholdText").textContent = `${elements.fileThreshold.value}+`;
+  document.getElementById("implementationThresholdText").textContent = `${elements.implementationFileThreshold.value}+`;
 }
 
 function setDirty(value) {
@@ -252,6 +256,64 @@ window.addEventListener("beforeunload", (event) => {
 const tokenFormatter = new Intl.NumberFormat("uk-UA", { notation: "compact", maximumFractionDigits: 1 });
 const exactTokenFormatter = new Intl.NumberFormat("uk-UA");
 const dateFormatter = new Intl.DateTimeFormat("uk-UA", { dateStyle: "medium", timeStyle: "short" });
+const shortDateFormatter = new Intl.DateTimeFormat("uk-UA", { day: "numeric", month: "short", year: "numeric" });
+
+function startOfDay(value = new Date()) {
+  const date = new Date(value);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function addDays(value, amount) {
+  const date = new Date(value);
+  date.setDate(date.getDate() + amount);
+  return date;
+}
+
+function localDateValue(value = new Date()) {
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function historyDateRange() {
+  const today = startOfDay();
+  let from = null;
+  let to = null;
+  let label = "Увесь час";
+  if (historyPeriod === "today") {
+    from = today;
+    to = addDays(today, 1);
+    label = "Сьогодні";
+  } else if (historyPeriod === "yesterday") {
+    from = addDays(today, -1);
+    to = today;
+    label = "Вчора";
+  } else if (historyPeriod === "week") {
+    const weekday = today.getDay() || 7;
+    from = addDays(today, -(weekday - 1));
+    to = addDays(today, 1);
+    label = "Цей тиждень";
+  } else if (historyPeriod === "month") {
+    from = new Date(today.getFullYear(), today.getMonth(), 1);
+    to = addDays(today, 1);
+    label = "Цей місяць";
+  } else if (historyPeriod === "custom") {
+    const fromValue = document.getElementById("historyDateFrom").value;
+    const toValue = document.getElementById("historyDateTo").value;
+    if (!fromValue || !toValue) throw new Error("Оберіть обидві дати для custom-періоду");
+    from = startOfDay(new Date(`${fromValue}T00:00:00`));
+    const lastDay = startOfDay(new Date(`${toValue}T00:00:00`));
+    if (from > lastDay) throw new Error("Дата «Від» має бути не пізніше дати «До»");
+    to = addDays(lastDay, 1);
+    label = `${shortDateFormatter.format(from)} — ${shortDateFormatter.format(lastDay)}`;
+  }
+  return {
+    from: from?.toISOString() || null,
+    to: to?.toISOString() || null,
+    label
+  };
+}
 
 function formatTokens(value) {
   const amount = Number(value) || 0;
@@ -270,6 +332,162 @@ function tokenCell(value, note = "") {
   const cell = makeElement("span", "token-cell", formatted.compact);
   cell.title = `${formatted.exact} tokens${note ? ` · ${note}` : ""}`;
   return cell;
+}
+
+function elapsedLabel(value, now = Date.now()) {
+  const started = Date.parse(value || "");
+  if (!Number.isFinite(started)) return "—";
+  const seconds = Math.max(0, Math.floor((now - started) / 1000));
+  if (seconds < 60) return `${seconds} с`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} хв`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} год ${minutes % 60} хв`;
+}
+
+async function copyDelegatedTaskId(id) {
+  try {
+    await navigator.clipboard.writeText(id);
+    showToast(`Task ID copied · ${id}`);
+  } catch {
+    showToast("Clipboard permission was denied", true);
+  }
+}
+
+async function cancelDelegatedTask(item, button) {
+  const stale = item.status === "stalled";
+  const confirmed = window.confirm(stale
+    ? `Clear stale task ${item.id}? It will be marked cancelled and removed from the active list. Existing logs will be kept.`
+    : `Cancel active task ${item.id}? This will stop its Codex worker and keep existing logs.`);
+  if (!confirmed) return;
+  button.disabled = true;
+  button.textContent = stale ? "Clearing…" : "Cancelling…";
+  try {
+    const result = await api("/api/delegated-tasks/cancel", {
+      method: "POST",
+      body: JSON.stringify({ id: item.id })
+    });
+    renderDelegatedTasks(result.live);
+    showToast(stale ? "Stale task cleared" : "Codex task cancelled");
+  } catch (error) {
+    showToast(`Task control: ${error.message}`, true);
+    await loadDelegatedTasks({ quiet: true });
+  }
+}
+
+async function retryDelegatedTask(item, button) {
+  const retryDescription = item.retryMode === "replay"
+    ? "Codex will replay its saved request with the original model, effort, and write mode."
+    : "Codex will continue the same saved thread with the original model, effort, and write mode.";
+  const confirmed = window.confirm(`Retry stale task ${item.id}? The stale run will be cancelled first. ${retryDescription}`);
+  if (!confirmed) return;
+  button.disabled = true;
+  button.textContent = "Retrying…";
+  try {
+    await api("/api/delegated-tasks/retry", {
+      method: "POST",
+      body: JSON.stringify({ id: item.id })
+    });
+    showToast("Codex task retry started");
+    window.setTimeout(() => loadDelegatedTasks({ quiet: true }), 500);
+  } catch (error) {
+    showToast(`Task retry: ${error.message}`, true);
+    await loadDelegatedTasks({ quiet: true });
+  }
+}
+
+function renderDelegatedTasks(snapshot = {}) {
+  const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+  const labels = { queued: "У черзі", running: "Виконується", stalled: "Не виконується" };
+  const rows = items.map((item) => {
+    const row = makeElement("article", `delegated-live-row ${item.status}`);
+    const status = makeElement("span", `live-task-status ${item.status}`);
+    status.append(makeElement("i", "", ""), makeElement("b", "", labels[item.status] || item.status));
+
+    const task = makeElement("div", "live-task-main");
+    const heading = makeElement("div", "live-task-name");
+    heading.append(
+      makeElement("strong", "", item.title || "Codex task"),
+      makeElement("code", "", item.id || "—")
+    );
+    const route = item.route === "audit" ? "Audit" : "Delegated";
+    const details = [item.project, route, item.taskClass, item.model, item.effort, item.write ? "write" : "read-only"].filter(Boolean).join(" · ");
+    const detail = makeElement("small", "", details || "Codex companion");
+    detail.title = item.workspaceRoot || "Codex companion job state";
+    task.append(heading, detail);
+
+    const timing = makeElement("div", "live-task-timing");
+    timing.append(
+      makeElement("strong", "", elapsedLabel(item.startedAt || item.createdAt)),
+      makeElement("small", "", item.startedAt ? `від ${dateFormatter.format(new Date(item.startedAt))}` : "Очікує запуску")
+    );
+
+    const actions = makeElement("div", "live-task-actions");
+    const copy = makeElement("button", "live-task-button", "Copy ID");
+    copy.type = "button";
+    copy.addEventListener("click", () => copyDelegatedTaskId(item.id));
+    actions.append(copy);
+    if (item.canRetry) {
+      const retry = makeElement("button", "live-task-button", "Retry");
+      retry.type = "button";
+      retry.addEventListener("click", () => retryDelegatedTask(item, retry));
+      actions.prepend(retry);
+    }
+    if (item.canCancel) {
+      const cancel = makeElement("button", "live-task-button danger", item.status === "stalled" ? "Clear stale" : "Cancel");
+      cancel.type = "button";
+      cancel.addEventListener("click", () => cancelDelegatedTask(item, cancel));
+      actions.append(cancel);
+    }
+
+    const note = makeElement("p", "live-task-note");
+    if (item.status === "stalled") {
+      note.textContent = `Companion досі записує ${item.reportedStatus}, але PID${item.pid ? ` ${item.pid}` : ""} вже не існує. Задача фактично не виконується.`;
+    } else if (item.status === "queued") {
+      note.textContent = "Codex companion створив задачу й очікує запуску worker-процесу.";
+    } else {
+      note.textContent = `Worker-процес${item.pid ? ` PID ${item.pid}` : ""} активний.`;
+    }
+    row.append(status, task, timing, actions, note);
+    return row;
+  });
+
+  document.getElementById("delegatedLiveRows").replaceChildren(...rows);
+  document.getElementById("delegatedLiveEmpty").hidden = rows.length > 0;
+  const counts = snapshot.counts || {};
+  const active = (counts.running || 0) + (counts.queued || 0);
+  const stalled = counts.stalled || 0;
+  const badge = document.getElementById("delegatedLiveCount");
+  badge.textContent = stalled ? `${active} active · ${stalled} stale` : `${active} active`;
+  badge.className = `telemetry-status ${stalled ? "stalled" : active ? "active" : "muted"}`;
+  document.getElementById("delegatedLiveUpdatedAt").textContent = snapshot.generatedAt
+    ? `Live · ${new Intl.DateTimeFormat("uk-UA", { timeStyle: "medium" }).format(new Date(snapshot.generatedAt))}`
+    : "—";
+}
+
+async function loadDelegatedTasks({ quiet = false } = {}) {
+  if (delegatedTasksBusy) return;
+  delegatedTasksBusy = true;
+  try {
+    renderDelegatedTasks(await api("/api/delegated-tasks"));
+  } catch (error) {
+    if (!quiet) showToast(`Live tasks: ${error.message}`, true);
+  } finally {
+    delegatedTasksBusy = false;
+  }
+}
+
+function startDelegatedPolling() {
+  clearInterval(delegatedPollTimer);
+  loadDelegatedTasks({ quiet: historyLoaded });
+  delegatedPollTimer = setInterval(() => {
+    if (!document.hidden && !document.getElementById("historyView").hidden) loadDelegatedTasks({ quiet: true });
+  }, 3_000);
+}
+
+function stopDelegatedPolling() {
+  clearInterval(delegatedPollTimer);
+  delegatedPollTimer = null;
 }
 
 function renderHistory() {
@@ -319,6 +537,97 @@ function writeHistorySummary(history) {
     document.getElementById(`${prefix}SessionCount`).textContent = `${totals.sessions} сес. у поточній вибірці`;
   }
   document.getElementById("historyUpdatedAt").textContent = `Оновлено ${dateFormatter.format(new Date(history.generatedAt))}`;
+  renderCodexLimits(history.codexLimits);
+}
+
+function rateLimitWindowLabel(minutes) {
+  const value = Number(minutes);
+  if (!Number.isFinite(value) || value <= 0) return "Usage window";
+  if (value === 300) return "5 годин";
+  if (value === 10_080) return "7 днів";
+  if (value % 1_440 === 0) return `${value / 1_440} дн.`;
+  if (value % 60 === 0) return `${value / 60} год.`;
+  return `${value} хв.`;
+}
+
+function formatPercent(value) {
+  const percent = Math.max(0, Math.min(100, Number(value) || 0));
+  return Number.isInteger(percent) ? String(percent) : percent.toFixed(1);
+}
+
+function renderCodexLimits(snapshot) {
+  const rows = document.getElementById("codexLimitWindows");
+  const empty = document.getElementById("codexLimitsEmpty");
+  const badge = document.getElementById("codexLimitsStatus");
+  const updated = document.getElementById("codexLimitsUpdatedAt");
+  const windows = Array.isArray(snapshot?.windows) ? snapshot.windows : [];
+
+  if (!windows.length) {
+    rows.replaceChildren();
+    empty.hidden = false;
+    badge.textContent = "No snapshot";
+    badge.className = "telemetry-status muted";
+    updated.textContent = "Відкрийте Codex, щоб оновити";
+    return;
+  }
+
+  const now = Date.now();
+  const normalized = windows.map((window) => {
+    const resetsAt = Date.parse(window.resetsAt || "");
+    return {
+      ...window,
+      usedPercent: Math.max(0, Math.min(100, Number(window.usedPercent) || 0)),
+      resetsAt,
+      expired: Number.isFinite(resetsAt) && resetsAt <= now
+    };
+  });
+  const current = normalized.filter((window) => !window.expired);
+  const maxUsed = current.length ? Math.max(...current.map((window) => window.usedPercent)) : 0;
+  badge.textContent = current.length ? `${formatPercent(maxUsed)}% max used` : "Snapshot expired";
+  badge.className = `telemetry-status ${current.length ? maxUsed >= 90 ? "stalled" : maxUsed >= 75 ? "needs-repair" : "active" : "stalled"}`;
+
+  const observedAt = Date.parse(snapshot.observedAt || "");
+  const plan = snapshot.planType ? `${snapshot.planType.charAt(0).toUpperCase()}${snapshot.planType.slice(1)}` : "Codex";
+  updated.textContent = Number.isFinite(observedAt)
+    ? `${plan} · snapshot ${dateFormatter.format(new Date(observedAt))}`
+    : `${plan} · snapshot time unavailable`;
+
+  const fragments = normalized.map((window) => {
+    const tone = window.expired ? "expired" : window.usedPercent >= 90 ? "danger" : window.usedPercent >= 75 ? "warn" : "";
+    const label = rateLimitWindowLabel(window.windowMinutes);
+    const article = makeElement("article", `codex-limit-window ${tone}`.trim());
+    const header = makeElement("div", "codex-limit-window-header");
+    header.append(
+      makeElement("span", "", label),
+      makeElement("strong", "", window.expired ? "—" : `${formatPercent(window.usedPercent)}%`)
+    );
+
+    const track = makeElement("div", "codex-limit-track");
+    const fill = makeElement("i");
+    fill.style.width = `${window.expired ? 0 : window.usedPercent}%`;
+    track.append(fill);
+    if (!window.expired) {
+      track.setAttribute("role", "progressbar");
+      track.setAttribute("aria-label", `${label}: використано ${formatPercent(window.usedPercent)}%`);
+      track.setAttribute("aria-valuemin", "0");
+      track.setAttribute("aria-valuemax", "100");
+      track.setAttribute("aria-valuenow", String(window.usedPercent));
+    }
+
+    const details = makeElement("div", "codex-limit-details");
+    const remaining = window.expired
+      ? "Snapshot expired"
+      : `${formatPercent(100 - window.usedPercent)}% доступно`;
+    const reset = Number.isFinite(window.resetsAt)
+      ? `${window.expired ? "Reset був" : "Reset"} ${dateFormatter.format(new Date(window.resetsAt))}`
+      : "Reset time unavailable";
+    details.append(makeElement("span", "", remaining), makeElement("span", "", reset));
+    article.append(header, track, details);
+    return article;
+  });
+
+  rows.replaceChildren(...fragments);
+  empty.hidden = true;
 }
 
 const routeLabels = {
@@ -362,8 +671,13 @@ async function loadHistory() {
   button.disabled = true;
   button.textContent = "Reading…";
   try {
-    const history = await api("/api/history?limit=30");
+    const range = historyDateRange();
+    const params = new URLSearchParams({ limit: "200" });
+    if (range.from) params.set("from", range.from);
+    if (range.to) params.set("to", range.to);
+    const history = await api(`/api/history?${params}`);
     historyItems = history.items;
+    document.getElementById("historyRangeLabel").textContent = range.label;
     writeHistorySummary(history);
     renderRoutingHistory(history.routing);
     renderHistory();
@@ -402,19 +716,22 @@ function renderTelemetryStatus(status) {
   document.getElementById("telemetryLoggerPath").textContent = status.loggerPath || "—";
   document.getElementById("telemetryHistoryPath").textContent = status.historyPath || "—";
   install.hidden = status.state !== "not-installed";
-  repair.hidden = !["needs-repair", "installed", "active", "blocked-by-organization"].includes(status.state);
-  uninstall.hidden = status.state === "not-installed";
+  repair.hidden = status.state !== "needs-repair";
+  uninstall.hidden = !(status.configured || status.loggerCurrent);
 
   if (status.state === "active") {
-    description.textContent = `Логер працює: ${status.decisionCount} рішень. Остання подія ${dateFormatter.format(new Date(status.lastEventAt))}. Промпти й код не зберігаються.`;
+    const gate = status.policyLoadedAt
+      ? `Routing policy завантажена Claude ${dateFormatter.format(new Date(status.policyLoadedAt))}.`
+      : "Routing gate активний; підтвердження завантаження policy з’явиться після нової Claude-сесії.";
+    description.textContent = `Логер працює: ${status.decisionCount} рішень. ${gate} Промпти й код не зберігаються.`;
   } else if (status.state === "installed") {
-    description.textContent = "Hooks встановлено. Відкрийте нову задачу в Claude Code — після першого рішення статус стане Active. Промпти й код не зберігаються.";
+    description.textContent = "Hooks і per-turn routing gate встановлено. Відкрийте нову задачу в Claude Code — після першого рішення статус стане Active. Промпти й код не зберігаються.";
   } else if (status.state === "needs-repair") {
-    description.textContent = "Частина hooks або файл логера відсутні чи застаріли. Repair відновить лише компоненти цього роутера й збереже інші hooks.";
+    description.textContent = "Частина hooks або файл логера відсутні чи застаріли. Reinstall відновить лише logger і routing-gate hooks цього роутера, збереже інші hooks та локальну історію.";
   } else if (status.state === "blocked-by-organization") {
     description.textContent = `Корпоративна політика дозволяє лише managed hooks (${status.organizationRestriction}). Інсталяція можлива, але Claude не запустить цей user hook без дозволу адміністратора.`;
   } else {
-    description.textContent = "Фіксує лише тип рішення — Claude-only, delegated або audit — разом із моделлю, effort та результатом. Промпти й код не зберігаються.";
+    description.textContent = "Фіксує лише тип рішення та додає короткий routing gate до кожного turn. Промпти й код не зберігаються.";
   }
 }
 
@@ -434,7 +751,7 @@ async function mutateTelemetry(action) {
     renderTelemetryStatus(status);
     await loadHistory();
     const message = action === "uninstall"
-      ? "Router logger removed · local history kept"
+      ? "Router logger and gate disabled · local history kept"
       : action === "repair"
         ? "Router logger repaired"
         : "Router logger installed";
@@ -449,7 +766,7 @@ async function mutateTelemetry(action) {
 document.getElementById("installTelemetryButton").addEventListener("click", () => mutateTelemetry("install"));
 document.getElementById("repairTelemetryButton").addEventListener("click", () => mutateTelemetry("repair"));
 document.getElementById("uninstallTelemetryButton").addEventListener("click", () => {
-  if (window.confirm("Remove only the router logger and its Claude hooks? Existing local history will be kept.")) {
+  if (window.confirm("Disable only the router logger and routing-gate hooks? Existing local history, routing policy, Claude, and Codex will be kept.")) {
     mutateTelemetry("uninstall");
   }
 });
@@ -646,7 +963,12 @@ function showView(name) {
   document.body.classList.toggle("setup-mode", isSetup);
   document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
   if (isSetup && !setupLoaded) loadSetupStatus();
-  if (isHistory && !historyLoaded) Promise.all([loadHistory(), loadTelemetryStatus()]);
+  if (isHistory) {
+    if (!historyLoaded) Promise.all([loadHistory(), loadTelemetryStatus(), loadDelegatedTasks()]);
+    startDelegatedPolling();
+  } else {
+    stopDelegatedPolling();
+  }
 }
 
 document.querySelectorAll("[data-view]").forEach((button) => {
@@ -661,7 +983,24 @@ document.querySelectorAll("[data-history-filter]").forEach((button) => {
   });
 });
 
-document.getElementById("refreshHistoryButton").addEventListener("click", loadHistory);
+const customDateFrom = document.getElementById("historyDateFrom");
+const customDateTo = document.getElementById("historyDateTo");
+customDateTo.value = localDateValue();
+customDateFrom.value = localDateValue(addDays(new Date(), -6));
+
+document.querySelectorAll("[data-history-period]").forEach((button) => {
+  button.addEventListener("click", () => {
+    historyPeriod = button.dataset.historyPeriod;
+    document.querySelectorAll("[data-history-period]").forEach((candidate) => candidate.classList.toggle("active", candidate === button));
+    document.getElementById("customDateRange").hidden = historyPeriod !== "custom";
+    if (historyPeriod !== "custom") loadHistory();
+  });
+});
+
+document.getElementById("applyCustomDateButton").addEventListener("click", loadHistory);
+document.getElementById("refreshHistoryButton").addEventListener("click", () => {
+  Promise.all([loadHistory(), loadDelegatedTasks(), loadTelemetryStatus()]);
+});
 
 const installButton = document.getElementById("installButton");
 const standalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
@@ -701,7 +1040,7 @@ installButton.addEventListener("click", async () => {
 
 if ("serviceWorker" in navigator) {
   installButton.dataset.serviceWorker = "registering";
-  navigator.serviceWorker.register("/sw.js?v=20260715-11", { updateViaCache: "none" })
+  navigator.serviceWorker.register("/sw.js?v=20260717-16", { updateViaCache: "none" })
     .then(() => navigator.serviceWorker.ready)
     .then((registration) => {
       installButton.dataset.serviceWorker = "ready";

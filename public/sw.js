@@ -1,4 +1,4 @@
-const BUILD = "20260715-11";
+const BUILD = "20260717-16";
 const CACHE_NAME = `claude-codex-router-${BUILD}`;
 const INDEX_FALLBACK = `/index.html?v=${BUILD}`;
 const APP_SHELL = [

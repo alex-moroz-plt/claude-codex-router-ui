@@ -7,6 +7,8 @@ import path from "node:path";
 const HISTORY_DIR = process.env.ROUTER_HISTORY_DIR || path.join(homedir(), ".claude", "router-history");
 const STATE_DIR = path.join(HISTORY_DIR, "state");
 const EVENTS_FILE = path.join(HISTORY_DIR, "events.jsonl");
+const POLICY_STATUS_FILE = path.join(HISTORY_DIR, "policy-status.json");
+const ROUTING_FILE = process.env.CLAUDE_ROUTING_FILE || path.join(homedir(), ".claude", "rules", "agent-routing.md");
 const VERSION = 1;
 
 function safeSegment(value) {
@@ -41,6 +43,41 @@ function isCodexAgent(input) {
 function verdictFrom(value) {
   const match = textFrom(value).match(/\b(?:VERDICT\s*:\s*)?(APPROVE|REVISE|BLOCK)\b/i);
   return match ? match[1].toUpperCase() : null;
+}
+
+async function routingGateConfig() {
+  let implementationFileThreshold = 3;
+  let fileThreshold = 4;
+  try {
+    const content = await readFile(ROUTING_FILE, "utf8");
+    const match = content.match(/<!-- ROUTING_UI_CONFIG\n([\s\S]*?)\nROUTING_UI_CONFIG -->/);
+    const config = match ? JSON.parse(match[1]) : {};
+    const legacyThresholds = { economy: 5, balanced: 3, strict: 2, custom: 3 };
+    if (Number.isInteger(config.implementationFileThreshold)) implementationFileThreshold = config.implementationFileThreshold;
+    else if (config.costProfile in legacyThresholds) implementationFileThreshold = legacyThresholds[config.costProfile];
+    if (Number.isInteger(config.fileThreshold)) fileThreshold = config.fileThreshold;
+  } catch {
+    // The generated policy may not exist yet; safe balanced defaults keep the reminder useful.
+  }
+  return { implementationFileThreshold, fileThreshold };
+}
+
+function routingGateContext({ implementationFileThreshold, fileThreshold }) {
+  return [
+    "Claude–Codex routing gate is active for this turn.",
+    `Before the first edit, estimate distinct files and architectural layers. Codex implementation is mandatory at ${implementationFileThreshold}+ files, across 2+ layers, or after one unsuccessful implementation/corrective attempt.`,
+    `A plan touching ${fileThreshold}+ files, multiple layers, or an ambiguous/high-risk area requires the configured Codex plan audit.`,
+    "Claude Explore, Plan, and general-purpose subagents may gather evidence but do not replace qualifying Codex involvement.",
+    "If a qualifying Codex route is skipped, state the concrete availability, subscription, or data-policy reason instead of silently implementing in Claude."
+  ].join(" ");
+}
+
+function editPathFrom(input, cwd) {
+  const tool = String(input.tool_name || "").toLowerCase();
+  if (!["edit", "write", "notebookedit"].includes(tool)) return null;
+  const candidate = input.tool_input?.file_path || input.tool_input?.notebook_path || input.tool_input?.path;
+  if (typeof candidate !== "string" || !candidate.trim()) return null;
+  return path.resolve(cwd || process.cwd(), candidate);
 }
 
 async function readState(filePath) {
@@ -95,15 +132,33 @@ async function main() {
   const hook = String(input.hook_event_name || "");
   let state = await readState(statePath);
 
+  if (hook === "InstructionsLoaded") {
+    const loadedPath = String(input.file_path || input.path || input.source || "");
+    if (loadedPath.includes("agent-routing.md") || textFrom(input).includes(ROUTING_FILE)) {
+      await writeState(POLICY_STATUS_FILE, { loadedAt: new Date().toISOString(), path: loadedPath || ROUTING_FILE });
+    }
+    return;
+  }
+
   if (hook === "UserPromptSubmit") {
     state = {
       sessionId,
       turnId: `${safeSegment(sessionId)}-${Date.now()}`,
       cwd: input.cwd || null,
       route: "pending",
+      implementationDelegated: false,
+      observedEditFiles: [],
+      implementationGateWarned: false,
       startedAt: new Date().toISOString()
     };
     await writeState(statePath, state);
+    const gateConfig = await routingGateConfig();
+    process.stdout.write(`${JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext: routingGateContext(gateConfig)
+      }
+    })}\n`);
     return;
   }
 
@@ -119,10 +174,35 @@ async function main() {
       taskClass: tags.class || null,
       model: tags.model || null,
       effort: tags.effort || null,
+      implementationDelegated: tags.mode !== "audit" || state.implementationDelegated === true,
       delegatedAt: new Date().toISOString()
     };
     await writeState(statePath, state);
     await appendEvent(input, state, { eventType: "decision", route, decisionId });
+    return;
+  }
+
+  if (hook === "PreToolUse") {
+    const editPath = editPathFrom(input, input.cwd || state?.cwd);
+    if (editPath && state && !state.implementationDelegated) {
+      const observed = new Set(Array.isArray(state.observedEditFiles) ? state.observedEditFiles : []);
+      observed.add(editPath);
+      state = { ...state, observedEditFiles: [...observed] };
+      const { implementationFileThreshold } = await routingGateConfig();
+      if (observed.size >= implementationFileThreshold && !state.implementationGateWarned) {
+        state.implementationGateWarned = true;
+        await writeState(statePath, state);
+        process.stdout.write(`${JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: `Claude–Codex Router observed ${observed.size} distinct edited files, reaching the ${implementationFileThreshold}-file implementation threshold. Delegate or resume the implementation through codex:codex-rescue before continuing. If Codex is unavailable or policy forbids it, state that concrete reason; one explicit retry is allowed to avoid a dead end.`
+          }
+        })}\n`);
+        return;
+      }
+      await writeState(statePath, state);
+    }
     return;
   }
 
@@ -132,7 +212,7 @@ async function main() {
       eventType: "outcome",
       route: state.route,
       outcome: failure ? "failed" : "completed",
-      verdict: failure ? null : verdictFrom(input.tool_response)
+      verdict: failure || state.route !== "audit" ? null : verdictFrom(input.tool_response)
     });
     return;
   }

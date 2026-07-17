@@ -8,10 +8,10 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Router" />
     <title>Claude × Codex Router</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260715-11" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260717-16" />
     <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-    <link rel="stylesheet" href="/styles.css?v=20260715-11" />
+    <link rel="stylesheet" href="/styles.css?v=20260717-16" />
   </head>
   <body class="setup-mode">
     <div class="grain" aria-hidden="true"></div>
@@ -24,7 +24,6 @@
         </div>
       </div>
       <div class="top-actions">
-        <a class="export-button" href="/downloads/Claude-Codex-Router-UI.zip" download><span>⇧</span> Export installer</a>
         <button id="installButton" class="install-button" type="button"><span>↓</span> Install app</button>
         <div class="local-pill"><span></span> Local only · 127.0.0.1</div>
       </div>
@@ -149,13 +148,13 @@
         <div class="controls-column">
           <section class="panel preset-panel">
             <div class="panel-heading">
-              <div><span class="section-no">00</span><h3>Профіль витрат</h3></div>
+              <div><span class="section-no">00</span><h3>Профіль маршрутизації</h3></div>
               <span id="costBadge" class="cost-badge">Balanced</span>
             </div>
             <div class="segmented" role="group" aria-label="Профіль витрат">
               <button type="button" data-preset="economy">Economy<small>мінімум рев’ю</small></button>
               <button type="button" data-preset="balanced" class="active">Balanced<small>рекомендовано</small></button>
-              <button type="button" data-preset="strict">Strict<small>більше контролю</small></button>
+              <button type="button" data-preset="strict">Strict<small>проактивний Codex</small></button>
             </div>
             <p class="preset-note">Профіль лише заповнює рекомендовані значення нижче. Ручна зміна робить профіль <b>Custom</b>, але автоматичну маршрутизацію не вимикає.</p>
           </section>
@@ -168,9 +167,10 @@
                 <strong>Керується у поточному вікні Claude</strong>
                 <p>Селектор біля поля вводу є джерелом правди. Ця утиліта не перевизначає модель, effort або thinking Claude — вона вирішує, коли підключити Codex і з якими параметрами.</p>
               </div>
-              <label class="field"><span>Поріг multi-file</span><div class="stepper"><button type="button" data-step="-1" data-target="fileThreshold">−</button><input id="fileThreshold" type="number" min="2" max="20" /><button type="button" data-step="1" data-target="fileThreshold">+</button></div></label>
+              <label class="field"><span>Поріг Codex implementation</span><div class="stepper"><button type="button" data-step="-1" data-target="implementationFileThreshold">−</button><input id="implementationFileThreshold" type="number" min="2" max="20" /><button type="button" data-step="1" data-target="implementationFileThreshold">+</button></div><small>З цього числа файлів делегування стає обов’язковим.</small></label>
+              <label class="field"><span>Поріг plan-audit</span><div class="stepper"><button type="button" data-step="-1" data-target="fileThreshold">−</button><input id="fileThreshold" type="number" min="2" max="20" /><button type="button" data-step="1" data-target="fileThreshold">+</button></div><small>З цього числа файлів Codex незалежно перевіряє план.</small></label>
             </div>
-            <p class="field-note">До порогу Claude працює сам, якщо немає окремого ризикового тригера.</p>
+            <p class="field-note">Пороги перевіряються перед першим edit і повторно після Explore/Plan. Перетин двох архітектурних шарів або невдала перша спроба залучають Codex незалежно від кількості файлів.</p>
           </section>
 
           <section class="panel">
@@ -206,8 +206,8 @@
               <details class="advanced-settings">
                 <summary>Ліміти й поведінка при BLOCK</summary>
                 <div class="field-grid two compact">
-                  <label class="field"><span>Максимум контексту для Codex</span><div class="suffix"><input id="packetTokens" type="number" min="200" max="2000" /><i>tok</i></div><small>Claude стискає план до цього розміру.</small></label>
-                  <label class="field"><span>Максимум відповіді Codex</span><div class="suffix"><input id="responseTokens" type="number" min="150" max="1200" /><i>tok</i></div><small>Короткий verdict замість нового аналізу з нуля.</small></label>
+                  <label class="field"><span>Контекст plan-audit</span><div class="suffix"><input id="packetTokens" type="number" min="200" max="2000" /><i>tok</i></div><small>Стосується лише стислого пакета перевірки плану.</small></label>
+                  <label class="field"><span>Відповідь plan-audit</span><div class="suffix"><input id="responseTokens" type="number" min="150" max="1200" /><i>tok</i></div><small>Стосується лише короткого audit verdict, не implementation.</small></label>
                 </div>
                 <div class="option-stack">
                   <label><input id="allowReaudit" type="checkbox" /><span><strong>Дозволити одну повторну перевірку після BLOCK</strong><small>Тільки якщо Claude суттєво переробив план.</small></span></label>
@@ -223,6 +223,7 @@
 
           <section class="panel">
             <div class="panel-heading"><div><span class="section-no">03</span><h3>Codex executor</h3></div></div>
+            <div class="routing-gate-note"><strong>Automatic gate</strong><span><b id="implementationThresholdText">3+</b> файли, два архітектурні шари або одна невдала спроба → Codex без додаткового прохання користувача.</span></div>
             <div class="routing-table">
               <div class="routing-row header"><span>Клас задачі</span><span>Модель</span><span>Effort</span></div>
               <div class="routing-row"><strong><i class="risk-dot low"></i>Small / bounded</strong><select id="smallModel" aria-label="Модель для малих задач"><option value="gpt-5.6-luna">GPT-5.6 Luna</option><option value="gpt-5.6-terra">GPT-5.6 Terra</option><option value="gpt-5.6-sol">GPT-5.6 Sol</option></select><select id="smallEffort" aria-label="Effort для малих задач"><option>low</option><option>medium</option><option>high</option></select></div>
@@ -272,7 +273,7 @@
                   <h4 id="telemetryTitle">Лог рішень роутера</h4>
                   <span id="telemetryStatus" class="telemetry-status muted">Перевіряємо…</span>
                 </div>
-                <p id="telemetryDescription">Фіксує лише тип рішення — Claude-only, delegated або audit — разом із моделлю, effort та результатом. Промпти й код не зберігаються.</p>
+                <p id="telemetryDescription">Фіксує лише тип рішення — Claude-only, delegated або audit — та додає короткий routing gate до кожного turn. Промпти й код не зберігаються.</p>
                 <div class="telemetry-paths">
                   <span>HOOK <code id="telemetryLoggerPath">—</code></span>
                   <span>LOG <code id="telemetryHistoryPath">—</code></span>
@@ -280,11 +281,46 @@
               </div>
             </div>
             <div class="telemetry-actions">
-              <button id="installTelemetryButton" class="primary-small" type="button">Install logger</button>
-              <button id="repairTelemetryButton" class="secondary-small" type="button" hidden>Repair</button>
-              <button id="uninstallTelemetryButton" class="text-button danger" type="button" hidden>Uninstall</button>
+              <button id="installTelemetryButton" class="primary-small" type="button">Install logger &amp; gate</button>
+              <button id="repairTelemetryButton" class="secondary-small" type="button" hidden>Reinstall logger &amp; gate</button>
+              <button id="uninstallTelemetryButton" class="text-button danger" type="button" hidden>Disable logger &amp; gate</button>
             </div>
           </section>
+
+          <section class="delegated-live" aria-labelledby="delegatedLiveTitle">
+            <div class="delegated-live-heading">
+              <div class="delegated-live-title">
+                <span class="live-pulse" aria-hidden="true"></span>
+                <div>
+                  <h4 id="delegatedLiveTitle">Делеговані задачі зараз</h4>
+                  <p>Live-статус із job state офіційного Codex companion, із перевіркою процесу.</p>
+                </div>
+              </div>
+              <div class="delegated-live-meta">
+                <span id="delegatedLiveCount" class="telemetry-status muted">Перевіряємо…</span>
+                <small id="delegatedLiveUpdatedAt">—</small>
+              </div>
+            </div>
+            <div id="delegatedLiveRows" class="delegated-live-rows" aria-live="polite"></div>
+            <p id="delegatedLiveEmpty" class="delegated-live-empty" hidden>Активних Codex-задач немає.</p>
+          </section>
+
+          <div class="history-period-toolbar">
+            <div class="history-period-filters" role="group" aria-label="Період історії">
+              <button type="button" data-history-period="all">Увесь час</button>
+              <button class="active" type="button" data-history-period="today">Сьогодні</button>
+              <button type="button" data-history-period="yesterday">Вчора</button>
+              <button type="button" data-history-period="week">Цей тиждень</button>
+              <button type="button" data-history-period="month">Цей місяць</button>
+              <button type="button" data-history-period="custom">Custom</button>
+            </div>
+            <div id="customDateRange" class="custom-date-range" hidden>
+              <label><span>Від</span><input id="historyDateFrom" type="date" /></label>
+              <label><span>До</span><input id="historyDateTo" type="date" /></label>
+              <button id="applyCustomDateButton" class="primary-small" type="button">Застосувати</button>
+            </div>
+            <span id="historyRangeLabel">Сьогодні</span>
+          </div>
 
           <div class="routing-summary" aria-label="Рішення роутера">
             <article><span>Claude-only</span><strong id="claudeOnlyCount">0</strong><small>без виклику Codex</small></article>
@@ -304,11 +340,29 @@
           <div class="usage-summary">
             <article><span>Claude · показані сесії</span><strong id="claudeTokenTotal">—</strong><small id="claudeSessionCount">Завантаження…</small></article>
             <article><span>Codex · показані сесії</span><strong id="codexTokenTotal">—</strong><small id="codexSessionCount">Завантаження…</small></article>
-            <article class="usage-note"><span>Що означають цифри</span><p>Це сирі token counters локальних клієнтів, а не гроші й не відсоток корпоративного ліміту. Кеш показано окремо.</p></article>
+            <article class="usage-note"><span>Що означають цифри</span><p>Це token counters локальних сесій. Відсотки account limit показано нижче окремо; кеш не подвоюється.</p></article>
           </div>
 
+          <section class="codex-limits" aria-labelledby="codexLimitsTitle">
+            <div class="codex-limits-heading">
+              <div>
+                <span class="section-no">CODEX ACCOUNT</span>
+                <div>
+                  <h4 id="codexLimitsTitle">Ліміти Codex</h4>
+                  <p>Останній account snapshot із локального Codex client — незалежно від фільтра сесій.</p>
+                </div>
+              </div>
+              <div class="codex-limits-meta">
+                <span id="codexLimitsStatus" class="telemetry-status muted">Очікуємо snapshot…</span>
+                <small id="codexLimitsUpdatedAt">—</small>
+              </div>
+            </div>
+            <div id="codexLimitWindows" class="codex-limit-windows"></div>
+            <p id="codexLimitsEmpty" class="codex-limits-empty">Codex ще не записав rate-limit snapshot у локальну історію.</p>
+          </section>
+
           <div class="history-toolbar">
-            <div class="history-filters" role="group" aria-label="Фільтр історії">
+            <div class="history-filters" role="group" aria-label="Агент у token history">
               <button class="active" type="button" data-history-filter="all">Усі</button>
               <button type="button" data-history-filter="claude">Claude</button>
               <button type="button" data-history-filter="codex">Codex</button>
@@ -334,6 +388,6 @@
     </footer>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260715-11" type="module"></script>
+    <script src="/app.js?v=20260717-16" type="module"></script>
   </body>
 </html>

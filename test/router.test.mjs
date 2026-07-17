@@ -5,18 +5,22 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  cancelDelegatedTask,
   DEFAULT_CONFIG,
   embedConfig,
   extractConfig,
   generateRules,
   restoreLatest,
+  retryDelegatedTask,
   saveConfig,
   validateConfig
 } from "../server.mjs";
-import { summarizeClaudeRecords, summarizeCodexRecords } from "../usage-history.mjs";
+import { getUsageHistory, summarizeClaudeRecords, summarizeCodexRateLimits, summarizeCodexRecords } from "../usage-history.mjs";
 import {
+  findDelegatedTaskControl,
   getTelemetryStatus,
   installTelemetry,
+  readDelegatedTasks,
   readRoutingTelemetry,
   telemetryPaths,
   uninstallTelemetry
@@ -33,6 +37,10 @@ test("balanced defaults generate subscription-only economical routing", () => {
   const rules = generateRules(DEFAULT_CONFIG);
   assert.match(rules, /Never add or use `ANTHROPIC_API_KEY`/);
   assert.match(rules, /touch 4 or more files/);
+  assert.match(rules, /touch 3 or more distinct files/);
+  assert.match(rules, /Delegation is mandatory/);
+  assert.match(rules, /does not count as Codex involvement/);
+  assert.match(rules, /Do not wait for the user to ask for Codex/);
   assert.match(rules, /at most 600 tokens/);
   assert.match(rules, /Limit the response to 400 tokens/);
   assert.match(rules, /--model gpt-5\.6-terra --effort medium/);
@@ -47,8 +55,16 @@ test("balanced defaults generate subscription-only economical routing", () => {
 });
 
 test("embedded UI config round-trips", () => {
-  const custom = { ...DEFAULT_CONFIG, fileThreshold: 7, postReview: "off" };
+  const custom = { ...DEFAULT_CONFIG, fileThreshold: 7, implementationFileThreshold: 5, postReview: "off" };
   assert.deepEqual(extractConfig(embedConfig(custom)), custom);
+});
+
+test("legacy profiles migrate to Codex-forward implementation thresholds", () => {
+  const { implementationFileThreshold: _removed, ...legacy } = DEFAULT_CONFIG;
+  assert.equal(validateConfig({ ...legacy, version: 1, costProfile: "economy" }).implementationFileThreshold, 5);
+  assert.equal(validateConfig({ ...legacy, version: 1, costProfile: "balanced" }).implementationFileThreshold, 3);
+  assert.equal(validateConfig({ ...legacy, version: 1, costProfile: "strict" }).implementationFileThreshold, 2);
+  assert.equal(validateConfig({ ...legacy, version: 1, costProfile: "strict" }).version, 2);
 });
 
 test("invalid or expensive audit values are rejected", () => {
@@ -57,6 +73,7 @@ test("invalid or expensive audit values are rejected", () => {
   assert.throws(() => validateConfig({ ...DEFAULT_CONFIG, smallModel: "gpt-5.4-mini" }), /GPT-5.6 model/);
   assert.throws(() => validateConfig({ ...DEFAULT_CONFIG, claudeModel: "custom-model" }), /not supported/);
   assert.throws(() => validateConfig({ ...DEFAULT_CONFIG, packetTokens: 99999 }), /packetTokens/);
+  assert.throws(() => validateConfig({ ...DEFAULT_CONFIG, implementationFileThreshold: 1 }), /implementationFileThreshold/);
 });
 
 test("save creates a backup and restore returns previous policy", async () => {
@@ -125,6 +142,9 @@ test("every model control is a dropdown with GPT-5.6 coding choices", async () =
   assert.doesNotMatch(html, /<(?:input|select)[^>]+id="claudeModel"/);
   assert.match(html, /Селектор біля поля вводу є джерелом правди/);
   assert.doesNotMatch(html, /gpt-5\.[0-4]/);
+  assert.match(html, /id="implementationFileThreshold"/);
+  assert.match(html, /Automatic gate/);
+  assert.match(html, /Контекст plan-audit/);
 });
 
 test("HTML and service worker use the same cache-busting build", async () => {
@@ -193,6 +213,321 @@ test("local Claude and Codex token counters are summarized without double counti
   assert.equal(codex.task, "Fix the stale PWA cache");
 });
 
+test("Codex rate-limit snapshots preserve dynamic 5-hour and weekly windows", () => {
+  const fiveHourReset = Math.floor(Date.parse("2026-07-17T15:00:00Z") / 1000);
+  const weeklyReset = Math.floor(Date.parse("2026-07-20T00:00:00Z") / 1000);
+  const snapshot = summarizeCodexRateLimits([
+    {
+      type: "event_msg",
+      timestamp: "2026-07-17T09:00:00Z",
+      payload: { type: "token_count", rate_limits: { primary: { used_percent: 99, window_minutes: 300 } } }
+    },
+    {
+      type: "event_msg",
+      timestamp: "2026-07-17T10:00:00Z",
+      payload: {
+        type: "token_count",
+        rate_limits: {
+          limit_id: "codex",
+          plan_type: "plus",
+          primary: { used_percent: 42.5, window_minutes: 300, resets_at: fiveHourReset },
+          secondary: { used_percent: 18, window_minutes: 10_080, resets_at: weeklyReset }
+        }
+      }
+    }
+  ]);
+  assert.deepEqual(snapshot, {
+    limitId: "codex",
+    limitName: null,
+    planType: "plus",
+    observedAt: "2026-07-17T10:00:00.000Z",
+    windows: [
+      { usedPercent: 42.5, remainingPercent: 57.5, windowMinutes: 300, resetsAt: "2026-07-17T15:00:00.000Z" },
+      { usedPercent: 18, remainingPercent: 82, windowMinutes: 10_080, resetsAt: "2026-07-20T00:00:00.000Z" }
+    ]
+  });
+});
+
+test("usage history applies an exact date range before calculating displayed totals", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "router-usage-range-"));
+  const claudeRoot = path.join(root, "claude");
+  const codexRoot = path.join(root, "codex");
+  await mkdir(claudeRoot, { recursive: true });
+  await mkdir(codexRoot, { recursive: true });
+  await writeFile(path.join(claudeRoot, "today.jsonl"), `${JSON.stringify({
+    sessionId: "today",
+    cwd: "/tmp/today",
+    timestamp: "2026-07-17T08:00:00Z",
+    message: { model: "claude-sonnet-5", usage: { input_tokens: 10, output_tokens: 5 } }
+  })}\n`);
+  await writeFile(path.join(codexRoot, "yesterday.jsonl"), [
+    { type: "session_meta", timestamp: "2026-07-16T08:00:00Z", payload: { id: "yesterday", cwd: "/tmp/yesterday" } },
+    {
+      type: "event_msg",
+      timestamp: "2026-07-16T08:01:00Z",
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: { input_tokens: 50, output_tokens: 10, total_tokens: 60 } },
+        rate_limits: {
+          limit_id: "codex",
+          plan_type: "plus",
+          primary: { used_percent: 37, window_minutes: 300, resets_at: Math.floor(Date.parse("2026-07-18T08:00:00Z") / 1000) }
+        }
+      }
+    }
+  ].map(JSON.stringify).join("\n"));
+
+  const history = await getUsageHistory({
+    limit: 20,
+    from: "2026-07-17T00:00:00Z",
+    to: "2026-07-18T00:00:00Z",
+    claudeRoot,
+    codexRoot
+  });
+  assert.deepEqual(history.items.map((item) => item.id), ["claude:today"]);
+  assert.deepEqual(history.totals, { claude: { sessions: 1, tokens: 15 }, codex: { sessions: 0, tokens: 0 } });
+  assert.equal(history.codexLimits.windows[0].usedPercent, 37);
+  assert.equal(history.codexLimits.windows[0].windowMinutes, 300);
+});
+
+test("live delegated tasks use companion job state and flag dead worker processes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "router-live-jobs-"));
+  const stateFile = path.join(root, "state.json");
+  await writeFile(stateFile, JSON.stringify({
+    jobs: [
+      {
+        id: "task-running",
+        status: "running",
+        jobClass: "task",
+        title: "Codex Task",
+        summary: "ROUTER_MODE: audit ROUTER_CLASS: normal ROUTER_MODEL: gpt-5.6-sol ROUTER_EFFORT: high PRIVATE PROMPT",
+        workspaceRoot: "/tmp/demo",
+        pid: 111,
+        startedAt: "2026-07-17T09:59:00Z",
+        updatedAt: "2026-07-17T09:59:30Z"
+      },
+      {
+        id: "task-stale",
+        status: "running",
+        jobClass: "task",
+        summary: "ROUTER_MODE: implementation ROUTER_MODEL: gpt-5.6-terra PRIVATE CODE",
+        workspaceRoot: "/tmp/demo",
+        pid: 222,
+        threadId: "thread-stale",
+        startedAt: "2026-07-17T09:50:00Z",
+        updatedAt: "2026-07-17T09:50:30Z"
+      },
+      { id: "task-done", status: "completed", jobClass: "task", updatedAt: "2026-07-17T09:58:00Z" }
+    ]
+  }));
+
+  const live = await readDelegatedTasks({
+    stateFiles: [stateFile],
+    pidChecker: (pid) => pid === 111,
+    now: Date.parse("2026-07-17T10:00:00Z")
+  });
+  assert.deepEqual(live.counts, { queued: 0, running: 1, stalled: 1 });
+  assert.equal(live.items.find((item) => item.id === "task-running").route, "audit");
+  assert.equal(live.items.find((item) => item.id === "task-running").canCancel, true);
+  assert.equal(live.items.find((item) => item.id === "task-stale").status, "stalled");
+  assert.equal(live.items.find((item) => item.id === "task-stale").canRetry, true);
+  assert.equal(live.items.find((item) => item.id === "task-stale").retryMode, "resume");
+  assert.doesNotMatch(JSON.stringify(live), /PRIVATE|PROMPT|CODE/);
+});
+
+test("delegated task control resolves the owning companion data directory", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "router-live-control-"));
+  const pluginDataDir = path.join(root, "codex-inline");
+  const stateFile = path.join(pluginDataDir, "state", "demo-123", "state.json");
+  await mkdir(path.dirname(stateFile), { recursive: true });
+  await writeFile(stateFile, JSON.stringify({ jobs: [{
+    id: "task-stale-control",
+    status: "running",
+    jobClass: "task",
+    workspaceRoot: "/tmp/demo",
+    updatedAt: "2026-07-17T10:00:00Z"
+  }] }));
+  const jobFile = path.join(path.dirname(stateFile), "jobs", "task-stale-control.json");
+  await mkdir(path.dirname(jobFile), { recursive: true });
+  await writeFile(jobFile, JSON.stringify({ request: { prompt: "private" } }));
+  const control = await findDelegatedTaskControl("task-stale-control", {
+    pluginDataRoot: root,
+    fallbackStateRoot: path.join(root, "missing"),
+    now: Date.parse("2026-07-17T10:01:00Z"),
+    pidChecker: () => false
+  });
+  assert.deepEqual(control, {
+    id: "task-stale-control",
+    status: "running",
+    stalled: true,
+    canRetry: true,
+    retryMode: "replay",
+    workspaceRoot: "/tmp/demo",
+    pluginDataDir,
+    sessionId: null,
+    threadId: null,
+    model: null,
+    effort: null,
+    write: false
+  });
+});
+
+test("stale cleanup delegates to the official companion cancel command", async () => {
+  let invocation = null;
+  const result = await cancelDelegatedTask("task-stale-control", {
+    findTask: async () => ({
+      id: "task-stale-control",
+      status: "running",
+      workspaceRoot: "/tmp/demo",
+      pluginDataDir: "/tmp/plugin-data"
+    }),
+    getStatus: async () => ({ plugin: { companionAvailable: true, companionPath: "/tmp/codex-companion.mjs" } }),
+    nodePath: "/tmp/node",
+    run: async (...args) => {
+      invocation = args;
+      return { code: 0, stdout: JSON.stringify({ jobId: "task-stale-control", status: "cancelled" }), stderr: "" };
+    }
+  });
+  assert.deepEqual(result, { taskId: "task-stale-control", status: "cancelled" });
+  assert.deepEqual(invocation[1], [
+    "/tmp/codex-companion.mjs", "cancel", "task-stale-control", "--json", "--cwd", "/tmp/demo"
+  ]);
+  assert.equal(invocation[2].env.CLAUDE_PLUGIN_DATA, "/tmp/plugin-data");
+  assert.equal(invocation[2].cwd, "/tmp/demo");
+});
+
+test("stale retry cancels first and replays the saved request through the companion worker", async () => {
+  const invocations = [];
+  let launch = null;
+  const result = await retryDelegatedTask("task-stale-control", {
+    findTask: async () => ({
+      id: "task-stale-control",
+      status: "running",
+      stalled: true,
+      canRetry: true,
+      retryMode: "replay",
+      workspaceRoot: "/tmp/demo",
+      pluginDataDir: "/tmp/plugin-data"
+    }),
+    getStatus: async () => ({ plugin: { companionAvailable: true, companionPath: "/tmp/codex-companion.mjs" } }),
+    nodePath: "/tmp/node",
+    run: async (...args) => {
+      invocations.push(args);
+      return { code: 0, stdout: JSON.stringify({ status: "cancelled" }), stderr: "" };
+    },
+    launch: async (...args) => {
+      launch = args;
+      return { pid: 4321 };
+    }
+  });
+  assert.deepEqual(result, { taskId: "task-stale-control", status: "retrying", pid: 4321, retryMode: "replay" });
+  assert.deepEqual(invocations[0][1], [
+    "/tmp/codex-companion.mjs", "cancel", "task-stale-control", "--json", "--cwd", "/tmp/demo"
+  ]);
+  assert.deepEqual(launch[1], [
+    "/tmp/codex-companion.mjs", "task-worker", "--cwd", "/tmp/demo", "--job-id", "task-stale-control"
+  ]);
+  assert.equal(launch[2].env.CLAUDE_PLUGIN_DATA, "/tmp/plugin-data");
+});
+
+test("stale retry resumes the exact saved thread when a foreground job has no request payload", async () => {
+  const invocations = [];
+  const result = await retryDelegatedTask("task-stale-thread", {
+    findTask: async () => ({
+      id: "task-stale-thread",
+      status: "running",
+      stalled: true,
+      canRetry: true,
+      retryMode: "resume",
+      workspaceRoot: "/tmp/demo",
+      pluginDataDir: "/tmp/plugin-data",
+      sessionId: "session-123",
+      threadId: "thread-123",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      write: true
+    }),
+    getStatus: async () => ({ plugin: { companionAvailable: true, companionPath: "/tmp/codex-companion.mjs" } }),
+    nodePath: "/tmp/node",
+    run: async (...args) => {
+      invocations.push(args);
+      return invocations.length === 1
+        ? { code: 0, stdout: JSON.stringify({ status: "cancelled" }), stderr: "" }
+        : { code: 0, stdout: JSON.stringify({ jobId: "task-retried", status: "queued" }), stderr: "" };
+    }
+  });
+  assert.deepEqual(result, {
+    taskId: "task-retried",
+    sourceTaskId: "task-stale-thread",
+    status: "queued",
+    retryMode: "resume"
+  });
+  assert.deepEqual(invocations[1][1], [
+    "/tmp/codex-companion.mjs", "task", "--background", "--resume", "--json", "--cwd", "/tmp/demo",
+    "--model", "gpt-5.6-sol", "--effort", "high", "--write"
+  ]);
+  assert.equal(invocations[1][2].env.CODEX_COMPANION_SESSION_ID, "session-123");
+});
+
+test("retry rejects live workers and stale records without a saved request", async () => {
+  await assert.rejects(
+    retryDelegatedTask("task-live-control", {
+      findTask: async () => ({ id: "task-live-control", stalled: false, canRetry: true })
+    }),
+    /Only a stale delegated task can be retried/
+  );
+  await assert.rejects(
+    retryDelegatedTask("task-old-control", {
+      findTask: async () => ({ id: "task-old-control", stalled: true, canRetry: false })
+    }),
+    /original task request is unavailable/
+  );
+});
+
+test("history page exposes live polling and every requested date filter", async () => {
+  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  const [html, app, server] = await Promise.all([
+    readFile(path.join(root, "public", "index.html"), "utf8"),
+    readFile(path.join(root, "public", "app.js"), "utf8"),
+    readFile(path.join(root, "server.mjs"), "utf8")
+  ]);
+  for (const period of ["today", "yesterday", "week", "month", "custom"]) {
+    assert.match(html, new RegExp(`data-history-period="${period}"`));
+  }
+  assert.match(html, /id="delegatedLiveRows"/);
+  assert.match(html, /id="codexLimitWindows"/);
+  assert.match(html, /Reinstall logger &amp; gate/);
+  assert.match(html, /Disable logger &amp; gate/);
+  assert.doesNotMatch(html, /Export installer/);
+  assert.match(app, /\/api\/delegated-tasks/);
+  assert.match(app, /function renderCodexLimits/);
+  assert.match(app, /windowMinutes/);
+  assert.match(app, /repair\.hidden = status\.state !== "needs-repair"/);
+  assert.match(app, /Copy ID/);
+  assert.match(app, /Retry/);
+  assert.match(app, /Clear stale/);
+  assert.match(app, /setInterval[\s\S]+3_000/);
+  assert.match(server, /url\.pathname === "\/api\/delegated-tasks"/);
+  assert.match(server, /url\.pathname === "\/api\/delegated-tasks\/cancel"/);
+});
+
+test("routing decision totals respect the selected history date range", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "router-routing-range-"));
+  const eventsFile = path.join(root, "events.jsonl");
+  await writeFile(eventsFile, [
+    { eventType: "decision", route: "delegated", timestamp: "2026-07-16T18:00:00Z", decisionId: "old" },
+    { eventType: "decision", route: "audit", timestamp: "2026-07-17T09:00:00Z", decisionId: "today" },
+    { eventType: "outcome", route: "audit", timestamp: "2026-07-17T09:05:00Z", decisionId: "today", outcome: "completed", verdict: "APPROVE" }
+  ].map(JSON.stringify).join("\n"));
+  const routing = await readRoutingTelemetry({
+    eventsFile,
+    from: "2026-07-17T00:00:00Z",
+    to: "2026-07-18T00:00:00Z"
+  });
+  assert.deepEqual(routing.totals, { "claude-only": 0, delegated: 0, audit: 1 });
+  assert.equal(routing.items[0].verdict, "APPROVE");
+});
+
 test("portable installer archive is generated and excludes local credentials", async () => {
   const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
   const archive = path.join(root, "public", "downloads", "Claude-Codex-Router-UI.zip");
@@ -203,13 +538,15 @@ test("portable installer archive is generated and excludes local credentials", a
 function runLogger(loggerPath, historyDir, input) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [loggerPath, "--claude-codex-router-telemetry-v1"], {
-      env: { ...process.env, ROUTER_HISTORY_DIR: historyDir },
+      env: { ...process.env, ROUTER_HISTORY_DIR: historyDir, CLAUDE_ROUTING_FILE: path.join(historyDir, "agent-routing.md") },
       stdio: ["pipe", "pipe", "pipe"]
     });
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.once("error", reject);
-    child.once("close", (code) => code === 0 ? resolve() : reject(new Error(stderr || `logger exited ${code}`)));
+    child.once("close", (code) => code === 0 ? resolve(stdout) : reject(new Error(stderr || `logger exited ${code}`)));
     child.stdin.end(JSON.stringify(input));
   });
 }
@@ -231,6 +568,8 @@ test("telemetry install and repair preserve unrelated Claude hooks, and uninstal
   const afterInstall = JSON.parse(await readFile(paths.settingsFile, "utf8"));
   assert.equal(afterInstall.enabledPlugins["codex@openai-codex"], true);
   assert.ok(afterInstall.hooks.UserPromptSubmit[0].hooks.some((hook) => hook.command === unrelated.command));
+  assert.ok(afterInstall.hooks.InstructionsLoaded);
+  assert.ok(afterInstall.hooks.PreToolUse.some((group) => group.matcher === "Agent|Task|Edit|Write|NotebookEdit"));
 
   await installTelemetry({ home, nodePath: process.execPath });
   const afterRepair = JSON.parse(await readFile(paths.settingsFile, "utf8"));
@@ -254,7 +593,11 @@ test("route logger records only routing metadata for audit and Claude-only decis
   await installTelemetry(overrides);
 
   const common = { session_id: "claude-audit-session", cwd: "/tmp/private-project" };
-  await runLogger(paths.loggerFile, paths.historyDir, { ...common, hook_event_name: "UserPromptSubmit", prompt: "SECRET USER PROMPT" });
+  const reminderOutput = await runLogger(paths.loggerFile, paths.historyDir, { ...common, hook_event_name: "UserPromptSubmit", prompt: "SECRET USER PROMPT" });
+  const reminder = JSON.parse(reminderOutput).hookSpecificOutput.additionalContext;
+  assert.match(reminder, /3\+ files/);
+  assert.match(reminder, /4\+ files/);
+  assert.doesNotMatch(reminder, /SECRET|USER PROMPT/);
   await runLogger(paths.loggerFile, paths.historyDir, {
     ...common,
     hook_event_name: "PreToolUse",
@@ -273,19 +616,71 @@ test("route logger records only routing metadata for audit and Claude-only decis
   });
   await runLogger(paths.loggerFile, paths.historyDir, { ...common, hook_event_name: "Stop" });
 
+  const implementation = { session_id: "claude-implementation-session", cwd: "/tmp/private-project" };
+  await runLogger(paths.loggerFile, paths.historyDir, { ...implementation, hook_event_name: "UserPromptSubmit", prompt: "PRIVATE IMPLEMENTATION" });
+  await runLogger(paths.loggerFile, paths.historyDir, {
+    ...implementation,
+    hook_event_name: "PreToolUse",
+    tool_name: "Agent",
+    tool_input: {
+      subagent_type: "codex:codex-rescue",
+      prompt: "ROUTER_MODE: implementation\nROUTER_CLASS: multi-file\nROUTER_MODEL: gpt-5.6-terra\nROUTER_EFFORT: high\nPRIVATE CODE"
+    }
+  });
+  await runLogger(paths.loggerFile, paths.historyDir, {
+    ...implementation,
+    hook_event_name: "PostToolUse",
+    tool_name: "Agent",
+    tool_input: { subagent_type: "codex:codex-rescue" },
+    tool_response: { status: "BLOCK", content: "Implementation completed" }
+  });
+  await runLogger(paths.loggerFile, paths.historyDir, { ...implementation, hook_event_name: "Stop" });
+
   const claudeOnly = { session_id: "claude-only-session", cwd: "/tmp/second-project" };
   await runLogger(paths.loggerFile, paths.historyDir, { ...claudeOnly, hook_event_name: "UserPromptSubmit", prompt: "ANOTHER SECRET" });
   await runLogger(paths.loggerFile, paths.historyDir, { ...claudeOnly, hook_event_name: "Stop" });
 
   const routing = await readRoutingTelemetry({ ...overrides, limit: 20 });
-  assert.deepEqual(routing.totals, { "claude-only": 1, delegated: 0, audit: 1 });
+  assert.deepEqual(routing.totals, { "claude-only": 1, delegated: 1, audit: 1 });
   const audit = routing.items.find((item) => item.route === "audit");
   assert.equal(audit.model, "gpt-5.6-sol");
   assert.equal(audit.effort, "high");
   assert.equal(audit.verdict, "APPROVE");
+  const delegated = routing.items.find((item) => item.route === "delegated");
+  assert.equal(delegated.outcome, "completed");
+  assert.equal(delegated.verdict, null);
   const rawLog = await readFile(paths.eventsFile, "utf8");
   assert.doesNotMatch(rawLog, /SECRET|USER PROMPT|REVIEW/);
   assert.equal((await getTelemetryStatus(overrides)).state, "active");
+
+  await runLogger(paths.loggerFile, paths.historyDir, {
+    session_id: "instructions-session",
+    hook_event_name: "InstructionsLoaded",
+    file_path: path.join(home, ".claude", "rules", "agent-routing.md")
+  });
+  assert.ok((await getTelemetryStatus(overrides)).policyLoadedAt);
+});
+
+test("routing gate blocks the threshold-reaching edit once and permits an explicit retry", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "router-threshold-gate-"));
+  const overrides = { home, nodePath: process.execPath };
+  const paths = telemetryPaths(overrides);
+  await installTelemetry(overrides);
+  const common = { session_id: "claude-edit-session", cwd: "/tmp/private-project" };
+  await runLogger(paths.loggerFile, paths.historyDir, { ...common, hook_event_name: "UserPromptSubmit", prompt: "PRIVATE MULTI FILE TASK" });
+  const edit = (filePath) => runLogger(paths.loggerFile, paths.historyDir, {
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "Edit",
+    tool_input: { file_path: filePath, old_string: "PRIVATE", new_string: "PRIVATE" }
+  });
+  assert.equal(await edit("src/one.ts"), "");
+  assert.equal(await edit("src/two.ts"), "");
+  const blocked = JSON.parse(await edit("src/three.ts")).hookSpecificOutput;
+  assert.equal(blocked.permissionDecision, "deny");
+  assert.match(blocked.permissionDecisionReason, /3 distinct edited files/);
+  assert.doesNotMatch(blocked.permissionDecisionReason, /PRIVATE MULTI FILE TASK/);
+  assert.equal(await edit("src/three.ts"), "");
 });
 
 async function writeExecutable(filePath, content) {

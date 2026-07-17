@@ -9,6 +9,7 @@ Use it when you want to keep working in Claude, but have Codex available for imp
 - Installs and checks the Claude → Codex bridge.
 - Creates a local routing policy for Claude Code.
 - Lets you choose Codex models and effort levels for different task types.
+- Applies separate file thresholds for Codex implementation and plan audit.
 - Adds optional plan review before coding.
 - Tracks local routing decisions: `Claude-only`, `delegated`, and `audit`.
 - Reads local Claude/Codex token counters from your machine.
@@ -68,10 +69,21 @@ After setup, keep using Claude as usual.
 
 Claude will follow the generated routing policy:
 
-- simple tasks stay Claude-only;
-- multi-file or risky work can be delegated to Codex;
+- read-only and small single-layer tasks stay Claude-only;
+- multi-file work is delegated to Codex automatically at the configured implementation threshold;
+- work spanning two architectural layers, or a corrective pass after one unsuccessful attempt, is delegated regardless of file count;
 - selected plans can be reviewed by Codex before implementation;
 - routing decisions can be logged locally for later inspection.
+
+The bundled hook repeats a short routing gate alongside every submitted prompt so the thresholds remain visible to Claude throughout a long session. If Claude reaches the implementation file threshold without involving Codex, the hook blocks that threshold-reaching Edit or Write once and asks Claude to delegate or state an allowed skip reason. Claude's built-in Explore and Plan agents may gather evidence, but they do not count as independent Codex involvement.
+
+The presets currently use these implementation thresholds:
+
+- Economy: 5 files;
+- Balanced: 3 files;
+- Strict: 2 files.
+
+Plan-audit has its own separate threshold and token limits. Those token limits do not cap Codex implementation turns.
 
 Open the UI at any time:
 
@@ -166,5 +178,7 @@ The decision logger stores routing metadata only:
 - working directory.
 
 It does not store prompts, responses, file contents, or code.
+
+The `UserPromptSubmit` hook reads only the numeric thresholds from the generated routing policy and injects a fixed routing reminder. The submitted prompt is never copied into the router history.
 
 Local token history is read from Claude and Codex client logs already present on your machine. These numbers are technical counters, not billing statements.
